@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+.repopilot
+.venv
+reference
+web/node_modules
+web/dist
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+.DS_Store

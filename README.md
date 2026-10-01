@@ -56,7 +56,64 @@ RepoPilot 正在从零重构。旧项目在目标和范围尚未明确时推进�
 - `pyproject.toml`、`uv.lock`、`environment.yml`、`requirements-dev.in` 和 `requirements-dev.txt` 当前直接位于项目根目录。
 - 当前采用 Python `>=3.12`，Conda 配置固定 Python `3.12.14`。
 - `uv lock --check` 已通过，说明项目声明与锁定文件一致；这不代表业务代码已经完成或应用已经可运行。
-- 当前尚未创建业务代码，也未运行应用或业务测试。
+- 已实现访问密钥认证、工作台和模型设置；代码任务执行尚未实现。
+
+### Docker 全栈运行
+
+`compose.yaml` 包含 PostgreSQL 16、Redis 7、FastAPI 和 Nginx 前端。PostgreSQL 保存模型配置，Redis 缓存模型列表（300 秒），两个数据库均使用命名数据卷。
+
+首次运行时，复制 `.env.example` 为 `.env`（不要覆盖现有文件），设置数据库密码和随机的 `API_TOKEN`，然后：
+
+```bash
+docker compose up -d --build --wait
+docker compose ps
+```
+
+访问 `http://127.0.0.1:8081/`，Nginx 将 `/api` 转发至 API 容器。所有宿主机端口只绑定 `127.0.0.1`；API 默认 8000、PostgreSQL 5432、Redis 6379，可通过 `.env` 调整。
+
+容器内的模型服务地址若位于宿主机，使用 `http://host.docker.internal:端口/v1`，不要使用容器自己的 `127.0.0.1`。
+
+停止服务使用 `docker compose down`，数据卷会保留；不要使用 `down -v`，除非确定要删除数据库数据。
+
+当前项目已建立最小分层结构：
+
+```text
+src/repopilot/
+├── api/              # FastAPI 应用、鉴权与 HTTP 路由
+├── application/      # 设置读写与模型端点服务
+├── domain/           # 设置领域模型与校验
+├── persistence/      # PostgreSQL 设置存储和初始化
+└── integration/      # 外部模型端点与 Redis 缓存
+```
+
+### Conda 本地开发
+
+宿主机统一使用 `repopilot` Conda 环境，不使用 `.venv`。全栈 Docker 已占用 8000 时，先执行 `docker compose stop api web` 再启动本地 API。
+
+```bash
+conda activate repopilot
+python -m pip install -e .
+docker compose up -d --wait postgres redis
+python -m repopilot
+```
+
+本地 API 使用 `.env` 的 `DATABASE_URL` 和 `REDIS_URL`；数据库用户名、密码、端口应与 Compose 配置一致。Docker API 使用 Compose 注入的容器网络地址，不使用宿主机地址。
+
+启动前端：
+
+```bash
+npm --prefix web run dev
+```
+
+工作台访问密钥由 `.env` 中的 `API_TOKEN` 控制。登录进入 `/app` 后，点击左下角、位于「退出工作台」左侧的「设置」打开弹窗。弹窗左栏当前提供「模型提供方」，右侧可配置 `Base URL`、`API Key`，并从兼容端点刷新模型列表。已配置密钥显示 `*****` 遮罩，不回显实际密钥，遮罩不会随表单提交；留空保留同一端点的原密钥。支持关闭按钮和 Escape 关闭弹窗。
+
+前端按 `views/`、`components/`、`api/`、`router/`、`stores/` 和 `styles/` 分工，`App.vue` 仅协调页面与会话。
+
+模型配置存放在 PostgreSQL 的 `model_settings` 表，启动时创建初始表和默认行。旧 `.repopilot/settings.json` 已删除，不再读写。API Key 在数据库中为明文，不会在 HTTP 响应中回显；请保护数据库凭据和备份。切换端点不会复用旧密钥。访问令牌仅保留在浏览器内存中，刷新后需要重新登录。
+
+Redis 模型列表缓存按端点与密钥的哈希隔离，最长保留 300 秒；不存储密钥原文。数据库或 Redis 无法连接时，API 启动失败，不回退到 JSON 文件。只有通过访问密钥认证的成员才能修改设置或查询模型列表。
+
+验证：Conda 环境中的 Ruff 检查和前端生产构建通过；四个服务已通过 Docker Compose 启动。实际验证 Nginx 登录、设置页显示、通过临时兼容模型端点刷新列表、Redis 缓存命中及凭据隔离、PostgreSQL 保存，并在 API 容器重启后读取相同设置。验证结束后已恢复空模型配置、删除测试缓存并关闭临时端点；未使用第三方真实模型服务凭据。
 
 ## 下一步
 
