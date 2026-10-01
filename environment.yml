@@ -1,0 +1,14 @@
+# Host development environment, usable on macOS and Windows.
+# Create: conda env create --file environment.yml
+# Activate: conda activate repopilot
+# Install this repository after activation: python -m pip install --no-deps --editable .
+# Docker Desktop, Git and Vue/Node tooling are managed separately.
+name: repopilot
+channels:
+  - defaults
+dependencies:
+  - python=3.12.14
+  - pip=26.2.1
+  - pip:
+      - --require-hashes
+      - -rrequirements-dev.txt

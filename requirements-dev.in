@@ -1,0 +1,33 @@
+# Host development environment; not a task sandbox or application package manifest.
+# Install through environment.yml, then install RepoPilot itself with:
+#   python -m pip install --no-deps --editable .
+# Keep this input and requirements-dev.txt aligned when dependencies change.
+
+# Model protocol and MCP; use the published SDK, never reference/ imports.
+openai-agents==0.22.2
+mcp>=1.19.0,<3
+# Backend and configuration.
+fastapi>=0.110,<1
+uvicorn[standard]
+pydantic>=2.12.2,<3
+pydantic-settings>=2,<3
+httpx
+pyyaml
+# PostgreSQL and Redis clients only; servers remain in Docker Desktop.
+sqlalchemy[asyncio]>=2,<3
+alembic>=1,<2
+cryptography==50.0.1
+psycopg[binary]>=3,<4
+asyncpg>=0.29,<1
+redis>=7,<8
+# Workspace integration and Python code analysis.
+docker>=7,<8
+tree-sitter>=0.25,<1
+tree-sitter-python
+python-lsp-server
+# Development tools; no project-wide lint/test policy is established here.
+pytest>=9.0.3,<10
+pytest-asyncio
+pytest-cov
+ruff
+mypy

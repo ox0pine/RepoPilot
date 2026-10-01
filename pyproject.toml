@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repopilot"
+version = "0.1.0"
+description = "Isolated Python repository coding harness with independently verified patches"
+requires-python = ">=3.12"
+dependencies = [
+  "openai-agents==0.22.2",
+  "mcp>=1.19.0,<3",
+  "jsonschema>=4,<5",
+  "fastapi>=0.110,<1",
+  "uvicorn[standard]",
+  "pydantic>=2.12.2,<3",
+  "pydantic-settings>=2,<3",
+  "httpx",
+  "pyyaml",
+  "sqlalchemy[asyncio]>=2,<3",
+  "alembic>=1,<2",
+  "cryptography==50.0.1",
+  "asyncpg>=0.29,<1",
+  "redis>=7,<8",
+  "docker>=7,<8",
+  "tree-sitter>=0.25,<1",
+  "tree-sitter-python",
+  "anyio>=4,<5",
+]
+
+[project.scripts]
+repopilot = "repopilot.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.3,<10", "pytest-asyncio", "ruff", "mypy"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repopilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
