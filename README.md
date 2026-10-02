@@ -6,7 +6,7 @@ RepoPilot 正在从零重构。旧项目在目标和范围尚未明确时推进�
 
 旧项目资料已移动到本仓库的 `reference/` 目录，并通过 `.gitignore` 忽略。该目录只用于查阅和对比，不会自动并入新项目。
 
-当前已有首页、访问密钥登录、工作台外壳、模型服务设置与 GitHub 授权。前端已整体重设计为 Vue / TypeScript + Naive UI + Lucide（`@lucide/vue`）的浅色工作台。真实代码任务执行、SSE 对话、多轮反馈、恢复与 PR 交付仍未实现；首页流程卡明确标为「规划中」，工作台不提供假聊天或无后端的任务提交。
+当前已有首页、访问密钥登录、对话列表与统计、模型/GitHub 设置，以及真实 Issue 来源驱动的 Goal 生成、反馈修改和人工批准。前端沿用 Vue / TypeScript + Naive UI + Lucide（`@lucide/vue`）浅色工作台。批准只确认目标：代码执行、源码检索、SSE、成果审阅和 PR 交付尚未接入，不创建 Run 或启动执行进程。
 
 ## 重构原则
 
@@ -39,6 +39,7 @@ RepoPilot 正在从零重构。旧项目在目标和范围尚未明确时推进�
 - [x] 建立 FastAPI 设置服务、PostgreSQL 持久化、Redis 模型列表缓存与 Vue 前端。
 - [x] 实现访问密钥认证、模型设置和 token-only GitHub 授权。
 - [x] 统一首页、登录、工作台、侧栏、设置弹窗与两类表单的 Naive UI / Lucide 视觉与交互。
+- [x] 建立 PostgreSQL 对话、不可变 Goal 版本及消息历史，支持真实来源、模型生成、修改、批准和租期恢复。
 
 `reference/` 仅用于保存旧仓库中的参考项目；Python/uv 环境配置已经迁移到当前项目根目录，作为新项目当前采用的开发环境基础。
 
@@ -53,11 +54,11 @@ RepoPilot 正在从零重构。旧项目在目标和范围尚未明确时推进�
 - `pyproject.toml`、`uv.lock`、`environment.yml`、`requirements-dev.in` 和 `requirements-dev.txt` 当前直接位于项目根目录。
 - 当前采用 Python `>=3.12`，Conda 配置固定 Python `3.12.14`。
 - 历史环境检查中 `uv lock --check` 已通过；该记录只证明当时依赖声明与锁文件一致，不证明任务执行能力完成。
-- 已实现访问密钥认证、工作台、模型设置与 GitHub 授权；任务执行链尚未实现。
+- 已实现认证、设置与 Goal 审批闭环；任务执行链尚未实现。
 
 ### Docker 全栈运行
 
-`compose.yaml` 包含 PostgreSQL 16、Redis 7、FastAPI 和 Nginx 前端。PostgreSQL 保存模型配置，Redis 缓存模型列表（300 秒），两个数据库均使用命名数据卷。
+`compose.yaml` 包含 PostgreSQL 16、Redis 7、FastAPI 和 Nginx 前端。PostgreSQL 保存设置、对话、Goal 版本与消息，Redis 仅缓存模型列表（300 秒），两个数据库均使用命名数据卷。
 
 首次运行时，复制 `.env.example` 为 `.env`（不要覆盖现有文件），设置数据库密码和随机的 `API_TOKEN`，然后：
 
@@ -77,10 +78,10 @@ docker compose ps
 ```text
 src/repopilot/
 ├── api/              # FastAPI 应用、鉴权与 HTTP 路由
-├── application/      # 设置读写与模型端点服务
-├── domain/           # 设置领域模型与校验
-├── persistence/      # PostgreSQL 设置存储和初始化
-└── integration/      # 外部模型端点与 Redis 缓存
+├── application/      # 设置与对话/Goal 用例编排
+├── domain/           # 设置、来源、Goal 与状态契约
+├── persistence/      # PostgreSQL 设置、对话、版本与消息
+└── integration/      # GitHub 只读来源、Chat Completions 与 Redis 缓存
 ```
 
 ### Conda 本地开发
@@ -103,11 +104,11 @@ npm --prefix web ci
 npm --prefix web run dev
 ```
 
-工作台访问密钥由 `.env` 中的 `API_TOKEN` 控制。首页 `/` 的「进入工作台」由 App 按内存会话分发到 `/auth` 或 `/app`。登录页可显示/隐藏密钥并用 Enter 提交，不提供记住登录。工作台只展示配置准备卡和「本地会话」，不声称服务在线或任务执行可用。
+工作台访问密钥由 `.env` 中的 `API_TOKEN` 控制。登录会话仅在内存保存，刷新后需要重新登录，并恢复合法的 `/app`、`/app/new` 或 `/app/tasks/{UUID}` 深链接。概览提供真实数据库统计，侧栏支持最近对话和加载更多；错误明确显示，不以零值或空列表掩盖读取失败。
 
 首页保留产品介绍、工作台入口与规划流程，不再展示「从配置开始」的模型服务/GitHub 授权介绍卡；实际配置仍在登录后的设置窗口中进行。
 
-登录后，桌面左下角「设置」或准备卡「打开设置」均打开同一个窗口；宽度不超过 768px 时侧栏改为顶部品牌与操作条，无固定底栏。窗口提供「模型提供方」与「GitHub 授权」，小屏分类横排。桌面尺寸上限 960×720px、视口留边 48px；不超过 640px 时留边 24px。分类切换保持边界不变，内容独立滚动，标题、关闭按钮和分类始终可见；Tab 限制在弹窗内，关闭后焦点返回原入口。GitHub 保存授权期间禁止关闭、Escape 和切换分类。
+登录后，桌面左下角「设置」或准备卡「打开设置」均打开同一个窗口；宽度不超过 768px 时采用品牌顶栏及菜单抽屉，最近对话不会堆在正文上方。窗口提供「模型提供方」与「GitHub 授权」，小屏分类横排。桌面尺寸上限 960×720px、视口留边 48px；不超过 640px 时留边 24px。Tab 限制在弹窗内，关闭后焦点返回入口。GitHub 保存授权期间禁止关闭、Escape 和切换分类。
 
 模型提供方可配置 `Base URL`、`API Key`，从兼容端点刷新并筛选可用模型。仅允许保存列表中的模型；空列表或刷新失败不能保存，旧端点迟到响应不会覆盖新端点。密钥遮罩不提交；同一端点留空省略 `api_key` 保留旧值，更换端点留空发送空字符串，不复用旧密钥。
 
@@ -131,21 +132,41 @@ conda run -n repopilot python -c 'from cryptography.fernet import Fernet; print(
 
 「保存并授权」先原子保存 token 与密钥对，提交后再向固定 `https://api.github.com` 注册账户 SSH authentication key；先查询避免重复，永不上传私钥。推荐 fine-grained PAT 账户权限 `Git SSH keys: Read and write`，或 classic PAT 的 `read:public_key` + `write:public_key`，无需 repo/admin 权限。GitHub 拒绝或网络失败不会撤销本地保存，页面会明确提示并允许再次授权；超时结果可能未知，重试使用同一密钥先查询确认。配置状态不是持久授权状态，可在 <https://github.com/settings/keys> 核对。
 
+### 对话与 Goal 审批
+
+新建对话填写 GitHub HTTPS 仓库链接、完整 40 位 commit SHA 和同仓库 Issue 链接。目前不接受 SSH URL、PR、其他托管平台、链接凭据或 query/fragment。私有仓库需要 token 的 Contents/Issues 读取权限；SSH 公钥注册成功不代表已经有来源读取权限。创建仅 GET 固定 GitHub API，验证 commit/Issue 后保存快照，不再注册 key，不修改远端。
+
+Goal 包含目标、修改范围、不包含、验收标准、建议执行计划、待确认事项。它是基于 Issue 快照的草案，不表示已经检索源码、修改代码或跑过测试。修改始终使用相同快照、上一版本与本次反馈；历史版本及批准记录保留。修改会立即撤销旧批准，失败也不会恢复。存在待确认事项仍可明确批准，但不代表执行前置条件已满足。
+
+状态为 `draft → generating → awaiting_approval → approved`；生成失败为 `generation_failed`，仅手动重试。非流式 Chat Completions 总时限 60 秒，响应上限 256 KiB；来源读取最多 35 秒，Issue 正文超过 64 KiB 明确拒绝。90 秒数据库租期在读取或写入时恢复中断生成，无后台队列或自动重试。Nginx `/api/` 读取超时为 120 秒。
+
+所有 `/api/tasks` 接口要求工作台 Bearer：`POST /api/tasks` 创建；`GET /api/tasks` 游标分页；`GET /api/tasks/stats` 聚合统计；`GET /api/tasks/{id}` 详情；`POST /api/tasks/{id}/goal` 携带 `expected_revision`、`action`（generate/revise/retry）及修改反馈；`POST /api/tasks/{id}/approve` 携带 `expected_revision`、`goal_version`。冲突返回 409，重新读取后人工确认，不静默覆盖。供应商认证失败返回安全 502，不触发本地会话退出。
+
+新增表沿用同一个 Base 和 `create_all`，只加表，不修改旧表。对话共享工作台访问权限，不是每用户隔离。列表使用 `(updated_at,id)` 倒序 keyset；活动记录可能前移，前端按 id 去重，刷新重建首屏与游标，并非快照分页。
+
 后端回归验证使用专用 PostgreSQL/Redis，不得指向现有工作台数据库；每个数据库测试创建并清理独立 UUID schema：
 
 ```bash
 TEST_DATABASE_URL='postgresql+asyncpg://测试用户:测试密码@127.0.0.1:测试端口/测试库' \
 TEST_REDIS_URL='redis://127.0.0.1:测试端口/0' \
-conda run -n repopilot python -m pytest tests/test_github_settings.py tests/test_github_registration.py -q
+conda run -n repopilot python -m pytest tests/test_tasks.py tests/test_goal_generation.py tests/test_task_sources.py tests/test_github_settings.py tests/test_github_registration.py -q
 ```
 
-测试中的 GitHub HTTP 使用隔离 MockTransport；生产 client 默认使用真实 transport，不提供模拟 GitHub 主机配置。
+测试中的 GitHub/模型 HTTP 使用注入的隔离 MockTransport；生产路径默认真实网络，不提供模拟来源或固定 Goal。缺测试数据库而 skip 不算通过；测试必须使用独立实例及 UUID schema。
 
 历史验证记录（非本次 UI 重构结果）：Conda 环境中的 Ruff 检查和当时的前端生产构建通过；四个服务曾通过 Docker Compose 启动。曾验证 Nginx 登录、设置页、临时兼容模型端点刷新、Redis 缓存与凭据隔离、PostgreSQL 保存及 API 重启后读取；结束时恢复空模型配置、删除测试缓存并关闭临时端点，未使用第三方真实模型服务凭据。
 
-本次 UI 重构验证：`npm --prefix web run build`（vue-tsc + Vite）通过。独立 headless Chromium 中拦截 `/api/**`，用纯测试凭据检查了 1440×900、390×844、768×900 三页和设置入口、无横向溢出、登录错误/Enter/显示隐藏/退出/刷新内存会话、skip-link、迟到登录和旧会话 401 竞态及跨源 redirect 防护。模型请求验证同端点省略 key、新端点空字符串、键盘选择 model-b、下拉点击、旧刷新丢弃、空列表和 502 禁止保存。GitHub fixture 覆盖创建/已有公钥、先保存后注册失败、503 加载重试、草稿丢弃和 1 秒保存期间关闭/分类/Escape 守卫。390×640 下内容真实滚动而标题/分类/外壳不动；分类边界实测一致、焦点限制及两个入口恢复通过，reduced-motion 可用，最终组件控制台无异常。这些 fixture 证明前端交互，不证明真实 GitHub 注册；本轮未运行后端测试。
+历史 UI 重构验证：当时 `npm --prefix web run build` 通过；headless Chromium fixture 覆盖多尺寸设置表单、认证竞态、焦点限制及模型列表交互。该记录不代表真实模型生成或 GitHub 注册。
 
-部署验证：仅执行 `docker compose up -d --build --no-deps web`，构建与替换成功；没有重建 API、修改 `.env` 或删除数据卷。在实际映射 `http://127.0.0.1:8081` 使用内存读取的工作台令牌登录，随后仅 GET 两类设置摘要，认证与 GET 均返回 200。桌面弹窗 960×720、390×844 下 366×820，分类切换尺寸一致且无横向溢出，组件控制台无异常；没有替换用户凭据或向真实 GitHub 注册新公钥。
+历史部署验证：曾仅重建 web 容器并验证真实登录及只读设置查询；不代表本次 Goal 后端已部署到用户运行中的服务。
+
+Goal 审批闭环验收：独立 `repopilot-goal-test` PostgreSQL/Redis（55432/56379）及 UUID schema 上，240 项后端测试通过，无跳过；前端 `vue-tsc + vite build` 通过。已有 SSH DSA 弃用警告与 Vite 单 chunk 超过 500 kB 提示保留，未隐藏。
+
+真实来源使用用户指定的私有仓库 `https://github.com/qfpqhyl/repopilot-e2e-private`、commit `2e3384843902b2ee5a46f96863032788704db176`、Issue `https://github.com/qfpqhyl/repopilot-e2e-private/issues/1`。现有 GitHub/模型设置只读复制至独立 smoke schema，未修改用户设置。真实服务及 1440×900 / 390×844 浏览器均完成创建、生成 v1、反馈“只修复该 Issue，不做依赖升级；验收包含问题复现”、生成 v2、批准及明确未执行提示；刷新重新登录恢复深链接，独立 API 重启后版本与批准仍在。未运行目标仓库代码、注册 SSH key 或修改远端 Issue。
+
+补充隔离 fixture 验证了 14 条列表分页与长标题、过期批准 409 保留草稿、读取失败保留历史、生成中切页停止轮询并丢弃迟到响应、阅读上文不强制拉底、统计/列表错误、旧会话及当前会话 401、移动抽屉和设置焦点返回。真实不存在 commit 与不可连接模型端点也分别显示来源/生成错误；所有检查页面无横向溢出，控制台无组件异常。桌面/手机概览、新建、待批准和已批准截图保留在本地 `tmp/goal-acceptance/`；fixture 仅证明交互，不代替上述真实模型链路。
+
+验收结束后关闭浏览器标签及独立 API/Vite/PostgreSQL/Redis 服务，删除 smoke schema 中复制的凭据和临时验证脚本；独立测试卷保留，用户原有服务与数据卷未动。模型继续使用系统已保存设置，没有新增 `.env` 模型凭据覆盖项；本次未重启或替换用户正在运行的部署。
 
 ## 下一步
 

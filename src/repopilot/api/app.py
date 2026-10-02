@@ -17,10 +17,15 @@ from repopilot.persistence.settings import SettingsRepository, SettingsStorageEr
 from repopilot.application.settings import GitHubSettingsService
 from repopilot.integration.github import GitHubClient
 from repopilot.persistence.settings import GitHubSettingsRepository
+from repopilot.application.tasks import TaskService
+from repopilot.integration.goals import GoalClient
+from repopilot.integration.task_sources import GitHubSourceClient
+from repopilot.persistence.tasks import TaskRepository
 
 from .routes.auth import build_router as build_auth_router
 from .routes.models import build_router as build_models_router
 from .routes.settings import build_router as build_settings_router
+from .routes.tasks import build_router as build_tasks_router
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
@@ -32,9 +37,13 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
     except (ArgumentError, ValueError):
         raise RuntimeError("Invalid PostgreSQL or Redis connection configuration") from None
-    service = SettingsService(SettingsRepository(database), ModelCache(redis))
-    github_service = GitHubSettingsService(
-        GitHubSettingsRepository(database, runtime.github_credentials_key), GitHubClient()
+    model_repository = SettingsRepository(database)
+    github_repository = GitHubSettingsRepository(database, runtime.github_credentials_key)
+    service = SettingsService(model_repository, ModelCache(redis))
+    github_service = GitHubSettingsService(github_repository, GitHubClient())
+    task_service = TaskService(
+        TaskRepository(database), model_repository, github_repository,
+        GitHubSourceClient(), GoalClient(),
     )
 
     @asynccontextmanager
@@ -63,11 +72,13 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error: RequestValidationError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
+        detail = "请求参数无效，请检查来源链接、完整 SHA 或操作版本" if request.url.path.startswith('/api/tasks') else "Invalid request payload"
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     app.include_router(build_auth_router(), prefix="/api")
     app.include_router(build_settings_router(service, github_service), prefix="/api")
     app.include_router(build_models_router(service), prefix="/api")
+    app.include_router(build_tasks_router(task_service), prefix="/api")
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

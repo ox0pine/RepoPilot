@@ -6,6 +6,13 @@ export function onUnauthorized(handler: () => void): void {
   unauthorizedHandler = handler
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = sessionToken.value
   const version = sessionVersion()
@@ -22,8 +29,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   }
   if (!response.ok) {
     const detail = typeof payload === 'object' && payload !== null && 'detail' in payload && typeof payload.detail === 'string' ? payload.detail : '请求失败'
-    throw new Error(detail)
+    throw new ApiError(detail, response.status)
   }
-  if (payload === null) throw new Error('服务端返回了无效响应')
+  if (payload === null) throw new ApiError('服务端返回了无效响应', response.status)
   return payload as T
 }
