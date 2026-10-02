@@ -105,13 +105,37 @@ python -m repopilot
 npm --prefix web run dev
 ```
 
-工作台访问密钥由 `.env` 中的 `API_TOKEN` 控制。登录进入 `/app` 后，点击左下角、位于「退出工作台」左侧的「设置」打开弹窗。弹窗左栏当前提供「模型提供方」，右侧可配置 `Base URL`、`API Key`，并从兼容端点刷新模型列表。已配置密钥显示 `*****` 遮罩，不回显实际密钥，遮罩不会随表单提交；留空保留同一端点的原密钥。支持关闭按钮和 Escape 关闭弹窗。
+工作台访问密钥由 `.env` 中的 `API_TOKEN` 控制。登录进入 `/app` 后，点击左下角「设置」打开弹窗。左栏提供「模型提供方」及「GitHub 授权」。模型提供方可配置 `Base URL`、`API Key`，并从兼容端点刷新模型列表；密钥遮罩不随表单提交，留空保留同一端点的原密钥。设置窗口在同一视口下保持固定尺寸，切换分类不改变大小；内容过多时在内容区上下滚动，标题、关闭按钮和分类栏保持可见。支持关闭按钮和 Escape，GitHub 保存授权期间禁用关闭及分类切换。
 
 前端按 `views/`、`components/`、`api/`、`router/`、`stores/` 和 `styles/` 分工，`App.vue` 仅协调页面与会话。
 
 模型配置存放在 PostgreSQL 的 `model_settings` 表，启动时创建初始表和默认行。旧 `.repopilot/settings.json` 已删除，不再读写。API Key 在数据库中为明文，不会在 HTTP 响应中回显；请保护数据库凭据和备份。切换端点不会复用旧密钥。访问令牌仅保留在浏览器内存中，刷新后需要重新登录。
 
 Redis 模型列表缓存按端点与密钥的哈希隔离，最长保留 300 秒；不存储密钥原文。数据库或 Redis 无法连接时，API 启动失败，不回退到 JSON 文件。只有通过访问密钥认证的成员才能修改设置或查询模型列表。
+
+### GitHub 授权设置
+
+「GitHub 授权」只需填写 GitHub API token，点击「保存并授权」即可。后端在首次配置时自动生成 Ed25519 SSH 公私钥对，将私钥和 token 加密保存，并自动向 GitHub 注册公钥；不再提供手动导入公私钥或单独注册接口。已有完整匹配的密钥对会复用，包括旧版保存的 RSA/ECDSA 密钥；修改 token 或重试不会重新生成密钥。配置属于整个工作台，持有工作台访问令牌的成员均可修改，并非按用户隔离的 OAuth 登录。已有 token 时留空复用，切换分类或关闭弹窗丢弃未保存草稿。
+
+部署时注入稳定的 `GITHUB_CREDENTIALS_KEY`，由部署者在安全终端生成，并与数据库备份独立保管：
+
+```bash
+conda run -n repopilot python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+不要提交生成结果。私钥和 token 使用该 Fernet 主密钥分别加密后存入 PostgreSQL `github_settings` 表，读取接口只返回公钥及两个配置状态。未配置有效主密钥时 GitHub 接口返回 503，既有登录和模型设置仍可用；密钥不匹配现有密文时返回错误，不覆盖原数据。恢复时必须恢复同一主密钥及数据库备份，不自动生成替代密钥。模型 API Key 的原有存储方式不变。
+
+「保存并授权」先原子保存 token 与密钥对，提交后再向固定 `https://api.github.com` 注册账户 SSH authentication key；先查询避免重复，永不上传私钥。推荐 fine-grained PAT 账户权限 `Git SSH keys: Read and write`，或 classic PAT 的 `read:public_key` + `write:public_key`，无需 repo/admin 权限。GitHub 拒绝或网络失败不会撤销本地保存，页面会明确提示并允许再次授权；超时结果可能未知，重试使用同一密钥先查询确认。配置状态不是持久授权状态，可在 <https://github.com/settings/keys> 核对。
+
+后端回归验证使用专用 PostgreSQL/Redis，不得指向现有工作台数据库；每个数据库测试创建并清理独立 UUID schema：
+
+```bash
+TEST_DATABASE_URL='postgresql+asyncpg://测试用户:测试密码@127.0.0.1:测试端口/测试库' \
+TEST_REDIS_URL='redis://127.0.0.1:测试端口/0' \
+conda run -n repopilot python -m pytest tests/test_github_settings.py tests/test_github_registration.py -q
+```
+
+测试中的 GitHub HTTP 使用隔离 MockTransport；生产 client 默认使用真实 transport，不提供模拟 GitHub 主机配置。
 
 验证：Conda 环境中的 Ruff 检查和前端生产构建通过；四个服务已通过 Docker Compose 启动。实际验证 Nginx 登录、设置页显示、通过临时兼容模型端点刷新列表、Redis 缓存命中及凭据隔离、PostgreSQL 保存，并在 API 容器重启后读取相同设置。验证结束后已恢复空模型配置、删除测试缓存并关闭临时端点；未使用第三方真实模型服务凭据。
 

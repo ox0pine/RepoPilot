@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from urllib.parse import urlsplit
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 def normalize_base_url(value: str) -> str:
@@ -47,3 +52,105 @@ class ModelSettingsUpdate(BaseModel):
 class ModelRefreshRequest(BaseModel):
     base_url: str = Field(min_length=1)
     api_key: str | None = None
+
+
+class PublicGitHubSettings(BaseModel):
+    public_key: str
+    private_key_configured: bool
+    api_token_configured: bool
+
+
+class GitHubSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    api_token: SecretStr | None = Field(default=None, max_length=4096)
+
+
+class GitHubPublicKeyResult(BaseModel):
+    status: Literal['created', 'already_exists']
+    key_id: int
+    public_key: str
+
+
+class GitHubAuthorizationResult(BaseModel):
+    settings: PublicGitHubSettings
+    registration: GitHubPublicKeyResult
+
+
+class InvalidGitHubSettingsError(ValueError):
+    pass
+
+
+def normalize_ssh_public_key(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ''
+    try:
+        if len(value.splitlines()) != 1:
+            raise ValueError
+        key = serialization.load_ssh_public_key(value.encode('utf-8'))
+        if not isinstance(key, (ed25519.Ed25519PublicKey, rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
+            raise ValueError
+        return key.public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+    except (ValueError, TypeError, UnsupportedAlgorithm):
+        raise InvalidGitHubSettingsError('Invalid SSH public key') from None
+
+
+def _load_ssh_private_key(private_key: str):
+    try:
+        loader = (serialization.load_ssh_private_key
+                  if private_key.startswith('-----BEGIN OPENSSH PRIVATE KEY-----')
+                  else serialization.load_pem_private_key)
+        key = loader(private_key.encode('utf-8'), password=None)
+        if not isinstance(key, (ed25519.Ed25519PrivateKey, rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey)):
+            raise ValueError
+    except TypeError:
+        raise InvalidGitHubSettingsError('Passphrase-protected SSH private keys are not supported') from None
+    except (ValueError, UnsupportedAlgorithm):
+        raise InvalidGitHubSettingsError('Invalid or unsupported SSH private key') from None
+    return key
+
+
+def validate_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
+    public_key = normalize_ssh_public_key(public_key)
+    private_key = private_key.replace('\r\n', '\n').strip()
+    if not private_key:
+        return public_key, ''
+    private_key += '\n'
+    key = _load_ssh_private_key(private_key)
+    if not public_key:
+        raise InvalidGitHubSettingsError('SSH public key is required when a private key is configured')
+    derived = key.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+    if derived != public_key:
+        raise InvalidGitHubSettingsError('SSH public and private keys do not match')
+    return public_key, private_key
+
+
+def ensure_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
+    if not private_key:
+        key = ed25519.Ed25519PrivateKey.generate()
+        return (
+            key.public_key().public_bytes(
+                serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+            ).decode(),
+            key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH,
+                serialization.NoEncryption(),
+            ).decode(),
+        )
+    normalized_private = private_key.replace('\r\n', '\n').strip() + '\n'
+    if not public_key:
+        key = _load_ssh_private_key(normalized_private)
+        public_key = key.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+        ).decode()
+    public_key, _ = validate_ssh_pair(public_key, normalized_private)
+    # Preserve the saved secret byte-for-byte when reusing a valid legacy pair.
+    return public_key, private_key
+
+
+def normalize_github_api_token(value: str) -> str:
+    value = value.strip()
+    if any(not ('!' <= char <= '~') for char in value):
+        raise InvalidGitHubSettingsError('Invalid GitHub API token')
+    return value

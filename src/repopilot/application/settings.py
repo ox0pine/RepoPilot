@@ -4,6 +4,9 @@ from repopilot.domain.settings import ModelSettings, PublicModelSettings
 from repopilot.integration.cache import ModelCache
 from repopilot.integration.models import fetch_models
 from repopilot.persistence.settings import SettingsRepository, StoredModelSettings
+from repopilot.domain.settings import GitHubAuthorizationResult, GitHubSettingsUpdate, PublicGitHubSettings
+from repopilot.integration.github import GitHubAPIError, GitHubClient
+from repopilot.persistence.settings import GitHubSettingsRepository, StoredGitHubSettings
 
 
 class InvalidSettingsError(Exception):
@@ -50,3 +53,33 @@ class SettingsService:
         models = await fetch_models(normalized_url, token)
         await self.cache.set(normalized_url, token, models)
         return models
+
+
+class GitHubSettingsService:
+    def __init__(self, repository: GitHubSettingsRepository, client: GitHubClient) -> None:
+        self.repository = repository
+        self.client = client
+
+    @staticmethod
+    def _public(settings: StoredGitHubSettings) -> PublicGitHubSettings:
+        return PublicGitHubSettings(
+            public_key=settings.public_key,
+            private_key_configured=bool(settings.private_key.get_secret_value()),
+            api_token_configured=bool(settings.api_token.get_secret_value()),
+        )
+
+    async def public(self) -> PublicGitHubSettings:
+        return self._public(await self.repository.load())
+
+    async def update(self, payload: GitHubSettingsUpdate) -> GitHubAuthorizationResult:
+        settings = await self.repository.save(payload)
+        try:
+            registration = await self.client.register_public_key(
+                public_key=settings.public_key, api_token=settings.api_token.get_secret_value(),
+            )
+        except GitHubAPIError as error:
+            raise GitHubAPIError(
+                'GitHub settings were saved, but public key registration failed: ' + error.detail,
+                error.status_code,
+            ) from None
+        return GitHubAuthorizationResult(settings=self._public(settings), registration=registration)

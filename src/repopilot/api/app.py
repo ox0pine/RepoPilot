@@ -14,6 +14,9 @@ from repopilot.config import AppSettings, get_settings
 from repopilot.integration.cache import ModelCache
 from repopilot.persistence.database import Database
 from repopilot.persistence.settings import SettingsRepository, SettingsStorageError
+from repopilot.application.settings import GitHubSettingsService
+from repopilot.integration.github import GitHubClient
+from repopilot.persistence.settings import GitHubSettingsRepository
 
 from .routes.auth import build_router as build_auth_router
 from .routes.models import build_router as build_models_router
@@ -30,6 +33,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     except (ArgumentError, ValueError):
         raise RuntimeError("Invalid PostgreSQL or Redis connection configuration") from None
     service = SettingsService(SettingsRepository(database), ModelCache(redis))
+    github_service = GitHubSettingsService(
+        GitHubSettingsRepository(database, runtime.github_credentials_key), GitHubClient()
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -60,7 +66,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": "Invalid request payload"})
 
     app.include_router(build_auth_router(), prefix="/api")
-    app.include_router(build_settings_router(service), prefix="/api")
+    app.include_router(build_settings_router(service, github_service), prefix="/api")
     app.include_router(build_models_router(service), prefix="/api")
 
     @app.get("/api/health")

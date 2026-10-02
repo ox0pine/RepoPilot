@@ -38,6 +38,7 @@ services:
       dockerfile: deploy/api.Dockerfile
     environment:
       API_TOKEN: ${API_TOKEN:?Set API_TOKEN}
+      GITHUB_CREDENTIALS_KEY: ${GITHUB_CREDENTIALS_KEY:-}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repopilot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-repopilot}
       REDIS_URL: redis://redis:6379/0
     ports:

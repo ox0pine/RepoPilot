@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class AppSettings(BaseSettings):
     api_token: SecretStr
+    github_credentials_key: SecretStr | None = None
     database_url: str = Field(
         default="postgresql+asyncpg://repopilot:repopilot@127.0.0.1:5432/repopilot", repr=False
     )
