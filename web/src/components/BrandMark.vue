@@ -7,5 +7,5 @@
 
 <style scoped>
 .brand-mark { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 16px; font-weight: 600; white-space: nowrap; }
-img { flex: none; object-fit: contain; }
+img { flex: none; width: 28px; height: 28px; object-fit: contain; border-radius: 8px; }
 </style>

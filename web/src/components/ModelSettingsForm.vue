@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import { NAlert, NButton, NForm, NFormItem, NInput, NSelect, NSpin, NTag } from 'naive-ui'
+import { RefreshCw } from '@lucide/vue'
 import { getSettings, refreshModels, updateModelSettings, type ModelSettings } from '../api/settings'
 
 const settings = ref<ModelSettings>({ base_url: '', model: '', api_key_configured: false })
@@ -41,6 +43,7 @@ watch([() => settings.value.base_url, apiKey], () => {
 }, { flush: 'sync' })
 
 async function refresh(): Promise<void> {
+  if (saving.value || refreshing.value || !settings.value.base_url.trim()) return
   const sequence = ++refreshSequence
   const baseUrl = settings.value.base_url.trim()
   const key = apiKey.value
@@ -54,14 +57,18 @@ async function refresh(): Promise<void> {
     if (!models.value.includes(settings.value.model)) settings.value.model = ''
     notice.value = result.models.length ? `已发现 ${result.models.length} 个模型` : '端点可访问，但没有返回模型'
   } catch (cause) {
-    if (sequence === refreshSequence) error.value = cause instanceof Error ? cause.message : '模型刷新失败'
+    if (sequence === refreshSequence) {
+      models.value = []
+      settings.value.model = ''
+      error.value = cause instanceof Error ? cause.message : '模型刷新失败'
+    }
   } finally {
     if (sequence === refreshSequence) refreshing.value = false
   }
 }
 
 async function save(): Promise<void> {
-  if (!loaded.value || !models.value.includes(settings.value.model)) return
+  if (!loaded.value || saving.value || refreshing.value || !settings.value.base_url.trim() || !models.value.includes(settings.value.model)) return
   refreshSequence += 1
   refreshing.value = false
   saving.value = true
@@ -94,35 +101,37 @@ onMounted(() => void load())
 
 <template>
   <section class="panel" aria-labelledby="model-settings-title">
-    <div class="panel-heading"><div><p class="eyebrow">模型提供方</p><h2 id="model-settings-title">模型与 API</h2><p class="muted">配置 OpenAI 兼容端点，并从端点读取可用模型。</p></div><span class="status">{{ settings.api_key_configured ? '已配置密钥' : '未配置密钥' }}</span></div>
-    <p v-if="loading" role="status">正在加载设置…</p><p v-if="error" class="alert" role="alert">{{ error }}</p><p v-if="notice" class="notice" role="status">{{ notice }}</p>
-    <button v-if="!loading && !loaded" class="button" type="button" @click="load">重试加载</button>
-    <form v-if="loaded" class="settings-form" @submit.prevent="save">
-      <fieldset :disabled="saving" class="settings-fields">
-        <div class="field">
-          <label for="base-url">Base URL</label>
-          <input id="base-url" v-model="settings.base_url" placeholder="https://api.openai.com/v1" autocomplete="url" required>
-          <p class="help">服务端会请求此地址下的 <code>/models</code> 端点。</p>
+    <div class="panel-heading"><div><h2 id="model-settings-title">模型与 API</h2><p class="help">配置 OpenAI 兼容端点，并从端点读取可用模型。</p></div><NTag v-if="loaded" :bordered="false">{{ settings.api_key_configured ? '已配置密钥' : '未配置密钥' }}</NTag></div>
+    <div v-if="loading" role="status"><NSpin size="small" /> 正在加载设置…</div>
+    <NAlert v-if="error" type="error" role="alert" class="feedback">{{ error }}</NAlert>
+    <NAlert v-if="notice" type="info" role="status" class="feedback">{{ notice }}</NAlert>
+    <NButton v-if="!loading && !loaded" attr-type="button" :disabled="loading" @click="load">重试加载</NButton>
+    <NForm v-if="loaded" label-placement="top" @submit.prevent="save">
+      <NFormItem label="Base URL" :label-props="{ for: 'base-url' }">
+        <div class="field-content"><NInput :value="settings.base_url" :disabled="saving" :input-props="{ id: 'base-url', autocomplete: 'url', spellcheck: false }" placeholder="https://api.openai.com/v1" @update:value="settings.base_url = $event" /><p class="help">服务端会请求此地址下的 <code>/models</code> 端点。</p></div>
+      </NFormItem>
+      <NFormItem label="API Key" :label-props="{ for: 'api-key' }">
+        <div class="field-content"><NInput :value="settings.api_key_configured && !apiKeyEditing ? maskedApiKey : apiKey" type="password" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false, readonly: settings.api_key_configured && !apiKeyEditing }" placeholder="输入模型服务密钥（可留空）" @focus="startApiKeyEdit" @update:value="apiKey = $event" /><p class="help">同一端点留空保留密钥；更换端点需重新填写</p></div>
+      </NFormItem>
+      <NFormItem label="模型" :label-props="{ id: 'model-label', for: 'model' }">
+        <div class="model-row">
+          <NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="先刷新模型列表" @update:value="settings.model = $event ?? ''" />
+          <NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="18" :stroke-width="1.75" aria-hidden="true" /></template>从端点刷新</NButton>
         </div>
-        <div class="field">
-          <label for="api-key">API Key</label>
-          <input id="api-key" :value="settings.api_key_configured && !apiKeyEditing ? maskedApiKey : apiKey" type="password" :readonly="settings.api_key_configured && !apiKeyEditing" :placeholder="settings.api_key_configured ? maskedApiKey : '输入模型服务密钥（可留空）'" autocomplete="new-password" @focus="startApiKeyEdit" @input="apiKey = ($event.target as HTMLInputElement).value">
-          <p class="help">密钥不会在页面回显。仅在端点不变时，留空才会保留已保存的密钥；更换端点不会复用旧密钥。</p>
-        </div>
-        <div class="field">
-          <label for="model">模型</label>
-          <div class="model-row">
-            <select id="model" v-model="settings.model"><option value="" disabled>先刷新模型列表</option><option v-for="model in models" :key="model" :value="model">{{ model }}</option></select>
-            <button class="button" type="button" :disabled="refreshing || !settings.base_url.trim()" @click="refresh">{{ refreshing ? '刷新中…' : '从端点刷新' }}</button>
-          </div>
-        </div>
-        <div class="actions"><button class="button primary" type="submit" :disabled="saving || refreshing || !settings.base_url.trim() || !settings.model">{{ saving ? '保存中…' : '保存设置' }}</button></div>
-      </fieldset>
-    </form>
+      </NFormItem>
+      <div class="actions"><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存设置</NButton></div>
+    </NForm>
   </section>
 </template>
 
 <style scoped>
-.settings-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
-.panel { padding: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }.eyebrow { margin-bottom: 5px; color: var(--text-muted); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; } h2 { margin-bottom: 5px; font-size: 18px; }.muted, .help { color: var(--text-secondary); }.status { padding: 4px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-hover); font-size: 11px; white-space: nowrap; }.field { margin-bottom: 20px; } label { display: block; margin-bottom: 6px; font-weight: 600; } input, select { width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; } input:focus, select:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); }.help { margin: 6px 0 0; font-size: 12px; }.model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }.button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }.button:hover { background: var(--surface-hover); }.primary { border-color: var(--accent); background: var(--accent); color: var(--surface); }.primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }.button:disabled { opacity: .55; cursor: not-allowed; }.actions { display: flex; justify-content: flex-end; padding-top: 4px; }.alert, .notice { padding: 11px 12px; border-radius: 7px; }.alert { background: var(--danger-bg); color: var(--danger-text); }.notice { background: var(--success-bg); color: var(--success-text); } code { padding: 2px 4px; border-radius: 4px; background: var(--code-bg); } @media (max-width: 640px) { .panel { padding: 16px; }.panel-heading { flex-direction: column; }.model-row { grid-template-columns: 1fr; }.actions .button { width: 100%; } }
+.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+h2 { margin-bottom: 8px; }
+.help { color: var(--text-secondary); margin: 8px 0 0; font-size: 12px; }
+.field-content, .model-row { width: 100%; min-width: 0; }
+.model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.actions { display: flex; justify-content: flex-end; }
+.feedback { margin-bottom: 16px; overflow-wrap: anywhere; }
+code { background: var(--code-bg); border-radius: 4px; padding: 2px 4px; }
+@media (max-width: 640px) { .panel-heading { flex-direction: column; } .model-row { grid-template-columns: 1fr; } .actions > * { width: 100%; } }
 </style>

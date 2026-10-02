@@ -12,6 +12,8 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@lucide/vue": "1.49.0",
+    "naive-ui": "2.45.3",
     "vue": "3.5.42"
   },
   "devDependencies": {

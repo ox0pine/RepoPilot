@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, NTag } from 'naive-ui'
 import { getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
 
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -102,65 +103,50 @@ onBeforeUnmount(() => { active = false; apiToken.value = ''; emit('busy', false)
 
 <template>
   <section class="panel" aria-labelledby="github-settings-title">
-    <div class="panel-heading"><div><h2 id="github-settings-title">连接 GitHub</h2><p class="muted">填写 token，自动生成 SSH 密钥并添加公钥到 GitHub。</p></div></div>
-    <p v-if="loading" role="status">正在加载设置…</p>
-    <p v-if="error" class="alert" role="alert">{{ error }}</p>
-    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
-    <p v-if="registration" class="notice" role="status">{{ registration }}</p>
-    <button v-if="!loading && !loaded" class="button" type="button" :disabled="busy" @click="load">重试加载</button>
-    <form v-if="loaded && saved" @submit.prevent="save">
-      <fieldset class="settings-fields" :disabled="busy">
-        <div class="field">
-          <p class="field-label">SSH 密钥</p>
-          <p class="help">{{ saved.public_key && saved.private_key_configured ? '已保存，授权时复用' : '授权时自动配置' }}</p>
-          <details v-if="saved.public_key">
-            <summary>查看公钥</summary>
-            <pre class="public-key">{{ saved.public_key }}</pre>
-          </details>
-        </div>
-        <div class="field">
-          <label for="github-api-token">GitHub API token</label>
+    <div class="panel-heading"><h2 id="github-settings-title">连接 GitHub</h2><p class="help">填写 token，自动配置 SSH 密钥并添加公钥到 GitHub。</p></div>
+    <div v-if="loading" role="status"><NSpin size="small" /> 正在加载设置…</div>
+    <NAlert v-if="error" type="error" role="alert" class="feedback">{{ error }}</NAlert>
+    <NAlert v-if="notice" type="info" role="status" class="feedback">{{ notice }}</NAlert>
+    <NAlert v-if="registration" type="success" role="status" class="feedback">{{ registration }}</NAlert>
+    <NButton v-if="!loading && !loaded" attr-type="button" :disabled="busy" @click="load">重试加载</NButton>
+    <NForm v-if="loaded && saved" label-placement="top" @submit.prevent="save">
+      <div class="configuration">
+        <p class="field-label">本地 SSH 密钥配置</p>
+        <NTag :bordered="false">{{ saved.public_key && saved.private_key_configured ? '已保存，授权时复用' : '授权时自动配置' }}</NTag>
+        <NCollapse v-if="saved.public_key" class="details"><NCollapseItem title="查看公钥" name="public-key" :disabled="busy"><pre class="public-key">{{ saved.public_key }}</pre></NCollapseItem></NCollapse>
+      </div>
+      <NFormItem label="GitHub API token" :label-props="{ for: 'github-api-token' }">
+        <div class="field-content">
           <p v-if="saved.api_token_configured" class="help">已保存，不回显。留空保留原 token。</p>
           <template v-if="saved.api_token_configured && !tokenEditing">
-            <input id="github-api-token" type="password" value="****************" readonly autocomplete="off" aria-label="已保存的 GitHub API token">
-            <button class="button" type="button" @click="tokenEditing = true">更换 token</button>
+            <NInput type="password" value="****************" :disabled="busy" :input-props="{ id: 'github-api-token', readonly: true, autocomplete: 'off' }" />
+            <NButton class="replace-token" attr-type="button" :disabled="busy" @click="tokenEditing = true">更换 token</NButton>
           </template>
-          <input v-else id="github-api-token" v-model="apiToken" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" :required="!saved.api_token_configured" :placeholder="saved.api_token_configured ? '输入新 token，留空保留原值' : '粘贴 GitHub token'">
-          <details class="help">
-            <summary>如何获取 token？</summary>
-            <p><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 fine-grained token</a>，账户权限选择 Git SSH keys: Read and write。</p>
-            <p>使用 <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">classic token</a> 时，勾选 read:public_key 和 write:public_key。</p>
-          </details>
+          <NInput v-else :value="apiToken" type="password" :maxlength="4096" :disabled="busy" :input-props="{ id: 'github-api-token', maxlength: 4096, autocomplete: 'new-password', spellcheck: false }" :placeholder="saved.api_token_configured ? '输入新 token，留空保留原值' : '粘贴 GitHub token'" @update:value="apiToken = $event" />
+          <NCollapse class="details"><NCollapseItem title="如何获取 token？" name="permissions" :disabled="busy">
+            <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 fine-grained token</a>，账户权限选择 Git SSH keys: Read and write。</p>
+            <p class="help">使用 <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">classic token</a> 时，勾选 read:public_key 和 write:public_key。</p>
+          </NCollapseItem></NCollapse>
         </div>
-        <div class="actions"><button class="button primary" type="submit" :disabled="!canSave">{{ saving ? '保存并授权中…' : '保存并授权' }}</button></div>
-        <p class="help">工作台共享配置。token 和私钥加密保存，私钥不上传。</p>
-        <p class="help">切换分类或关闭窗口会丢弃未保存内容。</p>
-        <a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">查看 GitHub 公钥</a>
-      </fieldset>
-    </form>
+      </NFormItem>
+      <div class="actions"><NButton type="primary" attr-type="submit" :disabled="!canSave" :loading="saving">{{ saving ? '保存并授权中…' : '保存并授权' }}</NButton></div>
+      <p class="help">工作台共享配置。token 和私钥加密保存，私钥不上传。</p>
+      <p class="help">切换分类或关闭窗口会丢弃未保存内容。</p>
+      <a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">查看 GitHub 公钥</a>
+    </NForm>
   </section>
 </template>
 
 <style scoped>
-.settings-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
-.panel { padding: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
-h2 { margin-bottom: 5px; font-size: 18px; }
-.muted, .help { color: var(--text-secondary); }
-.help { font-size: 12px; margin-top: 6px; line-height: 1.6; }
-.field { margin-bottom: 20px; }
-label { display: block; margin-bottom: 6px; font-weight: 600; }
-input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
-.field-label { margin-bottom: 6px; font-weight: 600; }
-.public-key { margin-top: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
-input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
-.button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
-.button:hover { background: var(--surface-hover); }
-.primary { background: var(--accent); color: white; border-color: var(--accent); }
-button:disabled { opacity: .55; cursor: not-allowed; }
-.alert, .notice { padding: 10px 12px; border-radius: 6px; margin-bottom: 16px; overflow-wrap: anywhere; }
-.alert { background: var(--danger-soft); color: var(--danger); }
-.notice { background: var(--accent-soft); color: var(--accent-hover); }
-a { color: var(--accent-hover); }
+.panel-heading { margin-bottom: 24px; }
+h2 { margin-bottom: 8px; }
+.help { color: var(--text-secondary); font-size: 12px; margin: 8px 0; line-height: 1.6; }
+.configuration { margin-bottom: 24px; }
+.field-label { margin-bottom: 8px; font-weight: 600; }
+.field-content { width: 100%; min-width: 0; }
+.public-key { margin: 8px 0; padding: 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.details, .replace-token { margin-top: 12px; }
+.actions { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.feedback { margin-bottom: 16px; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .actions > * { width: 100%; } }
 </style>

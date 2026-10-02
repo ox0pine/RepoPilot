@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { NConfigProvider, zhCN, dateZhCN } from 'naive-ui'
+import { themeOverrides } from './styles/theme'
 import HomeView from './views/HomeView.vue'
 import AuthView from './views/AuthView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
@@ -49,8 +51,10 @@ onUnmounted(() => window.removeEventListener('popstate', syncRoute))
 </script>
 
 <template>
+  <NConfigProvider :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
   <a class="skip-link" href="#main">跳到主要内容</a>
   <HomeView v-if="route === '/'" @navigate-auth="navigate(sessionToken ? '/app' : '/auth')" />
   <AuthView v-else-if="route === '/auth'" :error="authError" :loading="authLoading" @authenticated="login" @home="navigate('/')" />
   <WorkspaceView v-else-if="sessionToken" @logout="logout" />
+  </NConfigProvider>
 </template>
