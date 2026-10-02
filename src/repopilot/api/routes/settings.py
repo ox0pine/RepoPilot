@@ -47,9 +47,13 @@ def build_router(service: SettingsService, github_service: GitHubSettingsService
     async def get_github_settings() -> PublicGitHubSettings:
         return await github_operation(github_service.public())
 
-    @router.put('/github', response_model=GitHubAuthorizationResult)
-    async def update_github_settings(payload: GitHubSettingsUpdate) -> GitHubAuthorizationResult:
+    @router.put('/github', response_model=PublicGitHubSettings)
+    async def update_github_settings(payload: GitHubSettingsUpdate) -> PublicGitHubSettings:
         return await github_operation(github_service.update(payload))
+
+    @router.post('/github/authorize', response_model=GitHubAuthorizationResult)
+    async def authorize_github_key() -> GitHubAuthorizationResult:
+        return await github_operation(github_service.authorize())
 
 
     return router

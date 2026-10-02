@@ -4,8 +4,8 @@ from repopilot.domain.settings import ModelSettings, PublicModelSettings
 from repopilot.integration.cache import ModelCache
 from repopilot.integration.models import fetch_models
 from repopilot.persistence.settings import SettingsRepository, StoredModelSettings
-from repopilot.domain.settings import GitHubAuthorizationResult, GitHubSettingsUpdate, PublicGitHubSettings
-from repopilot.integration.github import GitHubAPIError, GitHubClient
+from repopilot.domain.settings import GitHubAuthorizationResult, GitHubSettingsUpdate, PublicGitHubSettings, InvalidGitHubSettingsError
+from repopilot.integration.github import GitHubClient
 from repopilot.persistence.settings import GitHubSettingsRepository, StoredGitHubSettings
 
 
@@ -71,15 +71,17 @@ class GitHubSettingsService:
     async def public(self) -> PublicGitHubSettings:
         return self._public(await self.repository.load())
 
-    async def update(self, payload: GitHubSettingsUpdate) -> GitHubAuthorizationResult:
-        settings = await self.repository.save(payload)
-        try:
-            registration = await self.client.register_public_key(
-                public_key=settings.public_key, api_token=settings.api_token.get_secret_value(),
-            )
-        except GitHubAPIError as error:
-            raise GitHubAPIError(
-                'GitHub settings were saved, but public key registration failed: ' + error.detail,
-                error.status_code,
-            ) from None
+    async def update(self, payload: GitHubSettingsUpdate) -> PublicGitHubSettings:
+        return self._public(await self.repository.save(payload))
+
+    async def authorize(self) -> GitHubAuthorizationResult:
+        settings = await self.repository.load()
+        token = settings.api_token.get_secret_value()
+        if not token:
+            raise InvalidGitHubSettingsError('Save a GitHub API token in settings before authorizing the SSH key')
+        if not settings.public_key or not settings.private_key.get_secret_value():
+            raise InvalidGitHubSettingsError('Save GitHub settings to create an SSH key pair before authorizing it')
+        registration = await self.client.register_public_key(
+            public_key=settings.public_key, api_token=token,
+        )
         return GitHubAuthorizationResult(settings=self._public(settings), registration=registration)

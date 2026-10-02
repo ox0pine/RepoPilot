@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
-import { CircleAlert, Target } from '@lucide/vue'
+import { ChevronDown, CircleAlert, Target } from '@lucide/vue'
 import type { TaskGoal } from '../api/tasks'
 
 const props = defineProps<{
@@ -9,6 +9,7 @@ const props = defineProps<{
   current: boolean
   canApprove: boolean
   canRevise: boolean
+  feedbackOpen: boolean
   busy: boolean
   approved: boolean
 }>()
@@ -48,7 +49,7 @@ const sections = computed(() => [
       <p>仅确认目标，不会执行代码。</p>
       <div class="buttons">
         <NButton v-if="canApprove" type="primary" :disabled="busy" @click="emit('approve')">批准目标</NButton>
-        <NButton v-if="canRevise" :disabled="busy" @click="emit('revise')">提出修改</NButton>
+        <NButton v-if="canRevise" :disabled="busy" :aria-expanded="feedbackOpen" aria-controls="goal-feedback-panel" @click="emit('revise')">{{ feedbackOpen ? '收起修改' : '提出修改' }}<ChevronDown :size="15" class="feedback-chevron" :class="{ expanded: feedbackOpen }" aria-hidden="true" /></NButton>
       </div>
     </footer>
   </article>
@@ -75,5 +76,7 @@ li + li { margin-top: 6px; }
 .goal-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-top: 1px solid var(--border-soft); background: var(--surface); }
 .goal-actions p { color: var(--text-muted); font-size: 12px; }
 .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+.feedback-chevron { margin-left: 6px; }
+.feedback-chevron.expanded { transform: rotate(180deg); }
 @media (max-width: 480px) { .goal-heading, .goal-content, .goal-actions { padding: 16px; } }
 </style>

@@ -1,152 +1,284 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, NTag } from 'naive-ui'
-import { getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, NTag, type InputInst } from 'naive-ui'
+import { Copy, KeyRound, GitBranch } from '@lucide/vue'
+import { ApiError } from '../api/client'
+import { authorizeGitHubSettings, getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
+import { sessionVersion } from '../stores/session'
 
 const emit = defineEmits<{ busy: [value: boolean] }>()
 const saved = ref<GitHubSettings | null>(null)
 const apiToken = ref('')
 const tokenEditing = ref(false)
+const loading = ref(false)
 const loaded = ref(false)
-const loading = ref(true)
 const saving = ref(false)
-const error = ref('')
-const notice = ref('')
-const registration = ref('')
-const busy = computed(() => saving.value)
-const canSave = computed(() => loaded.value && !busy.value && (!!apiToken.value.trim() || !!saved.value?.api_token_configured))
-const persistedFailurePrefix = 'GitHub settings were saved, but public key registration failed: '
+const authorizing = ref(false)
+const loadError = ref('')
+const saveError = ref('')
+const saveNotice = ref('')
+const authorizationError = ref('')
+const authorizationNotice = ref('')
+const copyNotice = ref('')
+const saveUncertain = ref(false)
+const tokenInput = ref<InputInst | null>(null)
+const replaceButton = ref<ComponentPublicInstance | null>(null)
+const busy = computed(() => saving.value || authorizing.value)
+const canSave = computed(() => loaded.value && tokenEditing.value && !!apiToken.value.trim() && !busy.value && !loading.value && !saveUncertain.value)
+const canAuthorize = computed(() => loaded.value && !!saved.value?.api_token_configured && !!saved.value?.private_key_configured && !!saved.value?.public_key && !tokenEditing.value && !apiToken.value && !busy.value && !loading.value && !saveUncertain.value)
 let active = true
-let discardDraftOnReload = false
+let controller: AbortController | undefined
+const initialSession = sessionVersion()
 
 watch(busy, value => emit('busy', value), { flush: 'sync' })
-watch([apiToken, tokenEditing], () => { registration.value = ''; notice.value = '' }, { flush: 'sync' })
+watch(() => sessionVersion(), () => {
+  active = false
+  controller?.abort()
+  apiToken.value = ''
+  saved.value = null
+  loaded.value = false
+  loading.value = false
+  saving.value = false
+  authorizing.value = false
+}, { flush: 'sync' })
 
-function discardDraft(): void {
+function isCurrent(): boolean {
+  return active && initialSession === sessionVersion()
+}
+
+function beginRequest(): AbortSignal {
+  controller = new AbortController()
+  return controller.signal
+}
+
+async function editToken(): Promise<void> {
+  tokenEditing.value = true
+  apiToken.value = ''
+  saveError.value = ''
+  saveNotice.value = ''
+  await nextTick()
+  if (isCurrent()) tokenInput.value?.focus()
+}
+
+async function cancelEdit(): Promise<void> {
+  if (busy.value || loading.value || saveUncertain.value) return
   apiToken.value = ''
   tokenEditing.value = false
-  discardDraftOnReload = false
+  saveError.value = ''
+  saveNotice.value = ''
+  await nextTick()
+  if (isCurrent()) replaceButton.value?.$el?.focus()
 }
 
 async function load(): Promise<void> {
-  if (loading.value && loaded.value || busy.value) return
+  if (!isCurrent() || loading.value || busy.value) return
   loading.value = true
-  loaded.value = false
-  error.value = ''
-  registration.value = ''
-  notice.value = ''
+  loadError.value = ''
+  const wasUncertain = saveUncertain.value
   try {
-    const settings = await getGitHubSettings()
-    if (!active) return
+    const settings = await getGitHubSettings(beginRequest())
+    if (!isCurrent()) return
     saved.value = settings
     loaded.value = true
-    if (discardDraftOnReload) {
-      discardDraft()
-      notice.value = '配置已保存，授权未成功，可重试。'
+    saveUncertain.value = false
+    if (!settings.api_token_configured) tokenEditing.value = true
+    if (wasUncertain) {
+      saveError.value = ''
+      saveNotice.value = '已重新读取服务器配置。无法判断草稿是否已保存；草稿仍保留，可明确选择再次保存。'
     }
   } catch (cause) {
-    if (active) error.value = cause instanceof Error ? cause.message : '无法加载 GitHub 设置'
+    if (isCurrent()) loadError.value = cause instanceof Error ? cause.message : '无法加载 GitHub 设置'
   } finally {
-    if (active) loading.value = false
+    if (isCurrent()) loading.value = false
+  }
+  if (isCurrent() && loaded.value && !saved.value?.api_token_configured) {
+    await nextTick()
+    if (isCurrent()) tokenInput.value?.focus()
   }
 }
 
 async function save(): Promise<void> {
-  if (!canSave.value) return
+  if (!isCurrent() || !canSave.value) return
   saving.value = true
-  error.value = ''; notice.value = ''; registration.value = ''
+  saveError.value = ''
+  saveNotice.value = ''
   try {
-    const result = await updateGitHubSettings(apiToken.value.trim() ? { api_token: apiToken.value } : {})
-    if (!active) return
-    saved.value = result.settings
-    discardDraft()
-    if (result.registration.public_key === result.settings.public_key) {
-      registration.value = result.registration.status === 'created'
-        ? '已保存，公钥已添加到 GitHub'
-        : '已保存，GitHub 已有此公钥'
-    } else {
-      error.value = '注册公钥与当前配置不一致，请重新加载后核对。'
-      loaded.value = false
-    }
+    const settings = await updateGitHubSettings({ api_token: apiToken.value.trim() }, beginRequest())
+    if (!isCurrent()) return
+    saved.value = settings
+    apiToken.value = ''
+    tokenEditing.value = false
+    authorizationError.value = ''
+    authorizationNotice.value = ''
+    saveNotice.value = 'Token 已保存。本次保存未验证仓库访问权限，也未执行 SSH 公钥授权。'
   } catch (cause) {
-    if (!active) return
-    const detail = cause instanceof Error ? cause.message : '保存并授权失败'
-    error.value = detail
-    const persisted = detail.startsWith(persistedFailurePrefix)
-    discardDraftOnReload = persisted
-    try {
-      const settings = await getGitHubSettings()
-      if (!active) return
-      saved.value = settings
-      loaded.value = true
-      if (persisted) {
-        discardDraft()
-        notice.value = '配置已保存，授权未成功，可重试。'
-      } else {
-        notice.value = '已加载当前配置，请检查错误后重试。'
-      }
-    } catch {
-      if (!active) return
-      loaded.value = false
-      notice.value = persisted
-        ? '配置已保存，授权失败。请重新加载后重试。'
-        : '无法确认保存结果，请重新加载。草稿暂时保留。'
-    }
+    if (!isCurrent()) return
+    saveUncertain.value = !(cause instanceof ApiError) || cause.status >= 500 || cause.status < 400
+    saveError.value = cause instanceof Error ? cause.message : '保存失败'
+    if (saveUncertain.value) saveNotice.value = '无法确认此次保存结果。草稿已保留，请先重新读取配置；不会自动重新提交。'
   } finally {
-    if (active) saving.value = false
+    if (isCurrent()) {
+      saving.value = false
+      if (!tokenEditing.value) {
+        await nextTick()
+        if (isCurrent()) replaceButton.value?.$el?.focus()
+      }
+    }
+  }
+}
+
+async function authorize(): Promise<void> {
+  if (!isCurrent() || !canAuthorize.value) return
+  authorizing.value = true
+  authorizationError.value = ''
+  authorizationNotice.value = ''
+  try {
+    const result = await authorizeGitHubSettings(beginRequest())
+    if (!isCurrent()) return
+    if (result.registration.public_key !== saved.value?.public_key || result.settings.public_key !== saved.value?.public_key) {
+      authorizationError.value = '服务器公钥与当前显示的配置不同，请重新读取配置后核对。'
+      loadError.value = authorizationError.value
+      loaded.value = false
+      return
+    }
+    authorizationNotice.value = result.registration.status === 'created'
+      ? 'SSH 公钥已添加到 GitHub。此结果不代表仓库读取权限已验证。'
+      : 'GitHub 已有此 SSH 公钥。此结果不代表仓库读取权限已验证。'
+  } catch (cause) {
+    if (isCurrent()) authorizationError.value = `${cause instanceof Error ? cause.message : 'SSH 公钥授权失败'}。本操作不会更改已保存的 token；可在 GitHub 核对公钥后手动重试。`
+  } finally {
+    if (isCurrent()) authorizing.value = false
+  }
+}
+
+async function copyPublicKey(): Promise<void> {
+  const publicKey = saved.value?.public_key
+  if (!publicKey) return
+  copyNotice.value = ''
+  try {
+    await navigator.clipboard.writeText(publicKey)
+    if (isCurrent() && saved.value?.public_key === publicKey) copyNotice.value = '公钥已复制'
+  } catch {
+    if (isCurrent()) copyNotice.value = '无法访问剪贴板，请选中公钥手动复制。'
   }
 }
 
 onMounted(() => void load())
-onBeforeUnmount(() => { active = false; apiToken.value = ''; emit('busy', false) })
+onBeforeUnmount(() => {
+  active = false
+  controller?.abort()
+  apiToken.value = ''
+  emit('busy', false)
+})
 </script>
 
 <template>
-  <section class="panel" aria-labelledby="github-settings-title">
-    <div class="panel-heading"><h2 id="github-settings-title">连接 GitHub</h2><p class="help">填写 token，自动配置 SSH 密钥并添加公钥到 GitHub。</p></div>
-    <div v-if="loading" role="status"><NSpin size="small" /> 正在加载设置…</div>
-    <NAlert v-if="error" type="error" role="alert" class="feedback">{{ error }}</NAlert>
-    <NAlert v-if="notice" type="info" role="status" class="feedback">{{ notice }}</NAlert>
-    <NAlert v-if="registration" type="success" role="status" class="feedback">{{ registration }}</NAlert>
-    <NButton v-if="!loading && !loaded" attr-type="button" :disabled="busy" @click="load">重试加载</NButton>
-    <NForm v-if="loaded && saved" label-placement="top" @submit.prevent="save">
-      <div class="configuration">
-        <p class="field-label">本地 SSH 密钥配置</p>
-        <NTag :bordered="false">{{ saved.public_key && saved.private_key_configured ? '已保存，授权时复用' : '授权时自动配置' }}</NTag>
-        <NCollapse v-if="saved.public_key" class="details"><NCollapseItem title="查看公钥" name="public-key" :disabled="busy"><pre class="public-key">{{ saved.public_key }}</pre></NCollapseItem></NCollapse>
-      </div>
-      <NFormItem label="GitHub API token" :label-props="{ for: 'github-api-token' }">
-        <div class="field-content">
-          <p v-if="saved.api_token_configured" class="help">已保存，不回显。留空保留原 token。</p>
-          <template v-if="saved.api_token_configured && !tokenEditing">
-            <NInput type="password" value="****************" :disabled="busy" :input-props="{ id: 'github-api-token', readonly: true, autocomplete: 'off' }" />
-            <NButton class="replace-token" attr-type="button" :disabled="busy" @click="tokenEditing = true">更换 token</NButton>
-          </template>
-          <NInput v-else :value="apiToken" type="password" :maxlength="4096" :disabled="busy" :input-props="{ id: 'github-api-token', maxlength: 4096, autocomplete: 'new-password', spellcheck: false }" :placeholder="saved.api_token_configured ? '输入新 token，留空保留原值' : '粘贴 GitHub token'" @update:value="apiToken = $event" />
-          <NCollapse class="details"><NCollapseItem title="如何获取 token？" name="permissions" :disabled="busy">
-            <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 fine-grained token</a>，账户权限选择 Git SSH keys: Read and write。</p>
-            <p class="help">使用 <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">classic token</a> 时，勾选 read:public_key 和 write:public_key。</p>
-          </NCollapseItem></NCollapse>
+  <section class="github-settings" aria-labelledby="github-settings-title">
+    <header class="section-heading">
+      <h2 id="github-settings-title"><GitBranch :size="22" aria-hidden="true" /> GitHub</h2>
+      <p>配置仓库来源访问权限，用于读取 commit 和 Issue、生成目标。</p>
+    </header>
+
+    <div v-if="loading" class="loading-state" role="status"><NSpin size="small" /> 正在读取 GitHub 配置…</div>
+    <NAlert v-if="loadError" type="error" role="alert" class="feedback">{{ loadError }}</NAlert>
+    <NButton v-if="loadError || (!loaded && !loading)" :disabled="busy || loading" @click="load">重新读取配置</NButton>
+
+    <template v-if="loaded && saved">
+      <section class="settings-card" aria-labelledby="repository-access-title">
+        <div class="card-heading">
+          <div><h3 id="repository-access-title">仓库访问</h3><p class="help">保存凭据，不自动授权 SSH。</p></div>
+          <NTag :bordered="false" :type="saved.api_token_configured ? 'success' : 'default'">{{ saved.api_token_configured ? '凭据已保存' : '未配置' }}</NTag>
         </div>
-      </NFormItem>
-      <div class="actions"><NButton type="primary" attr-type="submit" :disabled="!canSave" :loading="saving">{{ saving ? '保存并授权中…' : '保存并授权' }}</NButton></div>
-      <p class="help">工作台共享配置。token 和私钥加密保存，私钥不上传。</p>
-      <p class="help">切换分类或关闭窗口会丢弃未保存内容。</p>
-      <a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">查看 GitHub 公钥</a>
-    </NForm>
+
+        <div v-if="saved.api_token_configured && !tokenEditing" class="credential-summary">
+          <div><strong>GitHub API token</strong><p class="help">已加密保存；仓库权限将在创建对话时校验。</p></div>
+          <NButton ref="replaceButton" :disabled="busy || loading" @click="editToken">更换 token</NButton>
+        </div>
+        <NForm v-else label-placement="top" @submit.prevent="save">
+          <NFormItem :label="saved.api_token_configured ? '新的 GitHub API token' : 'GitHub API token'" :label-props="{ for: 'github-api-token' }">
+            <NInput ref="tokenInput" v-model:value="apiToken" type="password" show-password-on="click" :maxlength="4096" :disabled="busy || loading" :input-props="{ id: 'github-api-token', autocomplete: 'new-password', spellcheck: false }" placeholder="粘贴 GitHub Personal Access Token" />
+          </NFormItem>
+          <div class="actions">
+            <NButton v-if="saved.api_token_configured" :disabled="busy || loading || saveUncertain" @click="cancelEdit">取消更换</NButton>
+            <NButton type="primary" attr-type="submit" :disabled="!canSave" :loading="saving">{{ saving ? '正在保存…' : saved.api_token_configured ? '保存新 token' : '保存 token' }}</NButton>
+          </div>
+        </NForm>
+
+        <NAlert v-if="saveError" type="error" role="alert" class="feedback">{{ saveError }}</NAlert>
+        <NAlert v-if="saveNotice" :type="saveUncertain ? 'warning' : 'info'" role="status" class="feedback">{{ saveNotice }}</NAlert>
+        <NButton v-if="saveUncertain" :disabled="loading || busy" @click="load">重新读取配置，确认保存状态</NButton>
+
+        <div class="permission-guide">
+          <h4>创建 token 时，选择需要访问的仓库</h4>
+          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，在 Repository permissions 中开启以下只读权限：</p>
+          <div class="permission-list"><span>Contents <strong>Read-only</strong></span><span>Issues <strong>Read-only</strong></span></div>
+          <p class="help">组织仓库可能需要管理员批准。</p>
+          <details class="classic-guide"><summary>使用 Classic token？</summary><p class="help"><a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">Classic token</a> 读取私有仓库通常需要 <strong>repo</strong> scope，同时包含广泛的写权限。建议优先使用上述最小权限方案。</p></details>
+        </div>
+        <p class="help privacy-note">工作台共享配置。关闭设置或切换分类会丢弃未保存的草稿。</p>
+      </section>
+
+      <NCollapse class="advanced-settings">
+        <NCollapseItem title="高级 · SSH 公钥（可选）" name="ssh">
+          <section class="settings-card advanced-card" aria-labelledby="ssh-settings-title">
+            <h3 id="ssh-settings-title"><KeyRound :size="18" aria-hidden="true" /> SSH 公钥授权</h3>
+            <p class="help">生成目标通过 GitHub API 读取来源，<strong>不需要 SSH 授权</strong>。只有需要通过 SSH 访问 GitHub 时，才执行此操作。</p>
+            <p class="help">{{ saved.public_key && saved.private_key_configured ? '本地密钥对已生成并保存，私钥不会上传；这不代表公钥已获 GitHub 授权。' : '保存 token 时会生成本地密钥对，已有密钥会复用。' }}</p>
+            <template v-if="saved.public_key">
+              <p class="key-label">本地生成的公钥</p>
+              <pre class="public-key" tabindex="0" aria-label="SSH 公钥">{{ saved.public_key }}</pre>
+              <NButton :disabled="busy || loading" @click="copyPublicKey"><template #icon><Copy :size="16" aria-hidden="true" /></template>复制公钥</NButton>
+              <p v-if="copyNotice" class="help" role="status">{{ copyNotice }}</p>
+            </template>
+            <p class="help">如需授权，已保存的 fine-grained token 还需 Account permissions → <strong>Git SSH keys: Read and write</strong>；classic token 需要 <strong>read:public_key</strong> 和 <strong>write:public_key</strong>。这些额外权限不是生成目标的前置条件。</p>
+            <p v-if="tokenEditing || saveUncertain" class="help">请先保存或取消 token 草稿；保存结果不明确时，先重新读取配置，再授权公钥。</p>
+            <div class="ssh-actions"><NButton :disabled="!canAuthorize" :loading="authorizing" @click="authorize">{{ authorizing ? '正在授权公钥…' : '将已保存公钥授权到 GitHub' }}</NButton><a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">在 GitHub 查看公钥</a></div>
+            <NAlert v-if="authorizationError" type="error" role="alert" class="feedback">{{ authorizationError }}</NAlert>
+            <NAlert v-if="authorizationNotice" type="success" role="status" class="feedback">{{ authorizationNotice }}</NAlert>
+          </section>
+        </NCollapseItem>
+      </NCollapse>
+    </template>
   </section>
 </template>
 
 <style scoped>
-.panel-heading { margin-bottom: 24px; }
-h2 { margin-bottom: 8px; }
-.help { color: var(--text-secondary); font-size: 12px; margin: 8px 0; line-height: 1.6; }
-.configuration { margin-bottom: 24px; }
-.field-label { margin-bottom: 8px; font-weight: 600; }
-.field-content { width: 100%; min-width: 0; }
-.public-key { margin: 8px 0; padding: 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-.details, .replace-token { margin-top: 12px; }
-.actions { display: flex; justify-content: flex-end; margin-bottom: 16px; }
-.feedback { margin-bottom: 16px; overflow-wrap: anywhere; }
-@media (max-width: 640px) { .actions > * { width: 100%; } }
+.github-settings { min-width: 0; }
+.section-heading { margin-bottom: 24px; }
+h2, h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+h2 { font-size: 23px; line-height: 1.4; }
+h3 { font-size: 15px; }
+h4 { margin: 0 0 8px; font-size: 13px; }
+.section-heading > p { margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.settings-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.card-heading :deep(.n-tag) { flex-shrink: 0; }
+.help { color: var(--text-secondary); font-size: 13px; margin: 8px 0; line-height: 1.7; overflow-wrap: anywhere; }
+.credential-summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px; background: var(--bg); border-radius: 8px; }
+.credential-summary :deep(.n-button) { flex-shrink: 0; }
+.actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.permission-guide { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+.permission-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.permission-list > span { padding: 6px 10px; border: 1px solid var(--border-soft); border-radius: 6px; font-size: 12px; }
+.permission-list strong { margin-left: 8px; color: var(--text-muted); font-weight: 400; }
+.classic-guide { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
+.classic-guide summary { cursor: pointer; }
+.classic-guide summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.privacy-note { margin-top: 16px; }
+.advanced-settings { margin-top: 24px; }
+.advanced-card { border-color: var(--border-soft); }
+.key-label { margin: 20px 0 8px; font-weight: 600; font-size: 13px; }
+.public-key { margin: 0 0 12px; padding: 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.ssh-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 20px; }
+.feedback { margin-top: 16px; overflow-wrap: anywhere; }
+.loading-state { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; color: var(--text-secondary); }
+a { color: var(--accent); overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .settings-card { padding: 16px; }
+  .card-heading { gap: 8px; }
+  .credential-summary { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .credential-summary :deep(.n-button), .actions > *, .ssh-actions :deep(.n-button) { width: 100%; }
+  .ssh-actions :deep(.n-button__content) { white-space: normal; }
+  .ssh-actions :deep(.n-button) { height: auto; min-height: 40px; padding-top: 8px; padding-bottom: 8px; }
+}
 </style>

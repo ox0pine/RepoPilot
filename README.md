@@ -108,9 +108,9 @@ npm --prefix web run dev
 
 首页保留产品介绍、工作台入口与规划流程，不再展示「从配置开始」的模型服务/GitHub 授权介绍卡；实际配置仍在登录后的设置窗口中进行。
 
-登录后，桌面左下角「设置」或准备卡「打开设置」均打开同一个窗口；宽度不超过 768px 时采用品牌顶栏及菜单抽屉，最近对话不会堆在正文上方。窗口提供「模型提供方」与「GitHub 授权」，小屏分类横排。桌面尺寸上限 960×720px、视口留边 48px；不超过 640px 时留边 24px。Tab 限制在弹窗内，关闭后焦点返回入口。GitHub 保存授权期间禁止关闭、Escape 和切换分类。
+登录后，桌面左下角「设置」或准备卡「打开设置」均打开同一个窗口；宽度不超过 768px 时采用品牌顶栏及菜单抽屉。窗口提供「模型服务」与「GitHub」，小屏分类横排。桌面尺寸上限 1000×780px、视口留边 48px；不超过 640px 时留边 24px。内容独立滚动，Tab 限制在弹窗内，关闭后焦点返回入口。模型保存、GitHub 保存或 SSH 授权期间禁止关闭、Escape 和切换分类。
 
-模型提供方可配置 `Base URL`、`API Key`，从兼容端点刷新并筛选可用模型。仅允许保存列表中的模型；空列表或刷新失败不能保存，旧端点迟到响应不会覆盖新端点。密钥遮罩不提交；同一端点留空省略 `api_key` 保留旧值，更换端点留空发送空字符串，不复用旧密钥。
+模型设置按「连接信息 → 选择模型 → 保存」组织。已保存 API Key 显示状态摘要而不是虚假密码框，点击「更换」进入编辑，可取消并恢复已保存的模型。仅允许保存列表中的模型；空列表或刷新失败不能保存，旧端点迟到响应不会覆盖新端点。同一端点留空省略 `api_key` 保留旧值，更换端点留空发送空字符串，不复用旧密钥。
 
 前端按 `views/`、`components/`、`api/`、`router/`、`stores/` 和 `styles/` 分工。`App.vue` 保持页面与认证竞态协调，根部 `NConfigProvider` 使用中文 locale 与统一 `themeOverrides`；`styles/theme.ts` 的同一 palette 导出 CSS 变量，`main.ts` 在 mount 前写入 document 根，使 body 与 Teleport 弹窗共享颜色。`tokens.css` 仅保留非颜色变量。组件与图标显式导入，无第二套组件库、自动导入插件或主题切换。未来流式分层见 [核心流程](development-plan/02-core-flow.md)，本轮未安装 Markdown/流式依赖或创建空聊天模块。
 
@@ -118,9 +118,11 @@ npm --prefix web run dev
 
 Redis 模型列表缓存按端点与密钥的哈希隔离，最长保留 300 秒；不存储密钥原文。数据库或 Redis 无法连接时，API 启动失败，不回退到 JSON 文件。只有通过访问密钥认证的成员才能修改设置或查询模型列表。
 
-### GitHub 授权设置
+### GitHub 仓库访问与可选 SSH 授权
 
-「GitHub 授权」只需填写 GitHub API token，点击「保存并授权」即可。后端在首次配置时自动生成 Ed25519 SSH 公私钥对，将私钥和 token 加密保存，并自动向 GitHub 注册公钥；不再提供手动导入公私钥或单独注册接口。已有完整匹配的密钥对会复用，包括旧版保存的 RSA/ECDSA 密钥；修改 token 或重试不会重新生成密钥。配置属于整个工作台，持有工作台访问令牌的成员均可修改，并非按用户隔离的 OAuth 登录。已有 token 时留空复用，切换分类或关闭弹窗丢弃未保存草稿。
+「GitHub」先配置仓库访问 token。私有仓库推荐 fine-grained token：选择目标仓库，并授予 `Contents: Read-only`、`Issues: Read-only`；组织可能要求管理员批准。Classic token 的 `repo` scope 包含广泛写权限，优先选择最小权限方案。「保存 token」只做本地加密持久化，不请求 GitHub、不注册公钥，也不表示仓库权限已经验证；真实访问权限在创建对话时校验。已保存凭据只显示摘要，点击「更换 token」后必须填写非空新值，支持取消。保存结果不明时保留草稿，先明确重新读取，不自动重发。
+
+凭据属于整个工作台，并非每用户 OAuth 登录。首次保存仍在本地生成 Ed25519 SSH 公私钥对；已有完整密钥对复用，包括旧版 RSA/ECDSA 密钥。token 和私钥加密保存，私钥不上传。关闭窗口或切换分类会丢弃未保存草稿。
 
 部署时注入稳定的 `GITHUB_CREDENTIALS_KEY`，由部署者在安全终端生成，并与数据库备份独立保管：
 
@@ -130,13 +132,19 @@ conda run -n repopilot python -c 'from cryptography.fernet import Fernet; print(
 
 不要提交生成结果。私钥和 token 使用该 Fernet 主密钥分别加密后存入 PostgreSQL `github_settings` 表，读取接口只返回公钥及两个配置状态。未配置有效主密钥时 GitHub 接口返回 503，既有登录和模型设置仍可用；密钥不匹配现有密文时返回错误，不覆盖原数据。恢复时必须恢复同一主密钥及数据库备份，不自动生成替代密钥。模型 API Key 的原有存储方式不变。
 
-「保存并授权」先原子保存 token 与密钥对，提交后再向固定 `https://api.github.com` 注册账户 SSH authentication key；先查询避免重复，永不上传私钥。推荐 fine-grained PAT 账户权限 `Git SSH keys: Read and write`，或 classic PAT 的 `read:public_key` + `write:public_key`，无需 repo/admin 权限。GitHub 拒绝或网络失败不会撤销本地保存，页面会明确提示并允许再次授权；超时结果可能未知，重试使用同一密钥先查询确认。配置状态不是持久授权状态，可在 <https://github.com/settings/keys> 核对。
+生成 Goal 不需要 SSH 授权。「高级 · SSH 公钥（可选）」提供查看、复制公钥及单独授权。只有明确点击授权，才使用已保存 token 向固定 `https://api.github.com` 查询并注册现有公钥，不修改本地凭据。该操作额外需要 fine-grained PAT 的 `Git SSH keys: Read and write`，或 classic PAT 的 `read:public_key` + `write:public_key`；失败不影响已保存 token。存在未保存草稿时不能授权，避免误用旧凭据。配置状态不是持久授权状态，可在 <https://github.com/settings/keys> 核对。
+
+接口：`GET /api/settings/github` 返回配置摘要；`PUT /api/settings/github` 接受 token 并直接返回配置摘要；`POST /api/settings/github/authorize` 无需请求体，返回配置及公钥注册结果。均要求工作台 Bearer。旧的「保存并自动授权」返回结构与错误前缀已移除，调用方应使用独立操作。
+
+设置重构验证：245 项后端测试通过，覆盖保存零外部请求、授权不修改凭据、缺配置与上游失败；桌面/手机浏览器验证了已保存摘要、编辑取消与焦点、首次保存、保存与授权独立调用、结果不明保留草稿、忙碌关闭守卫和无横向溢出。交互写入使用隔离 fixture，未更改用户凭据或向真实 GitHub 注册公钥。
 
 ### 对话与 Goal 审批
 
 新建对话填写 GitHub HTTPS 仓库链接、完整 40 位 commit SHA 和同仓库 Issue 链接。目前不接受 SSH URL、PR、其他托管平台、链接凭据或 query/fragment。私有仓库需要 token 的 Contents/Issues 读取权限；SSH 公钥注册成功不代表已经有来源读取权限。创建仅 GET 固定 GitHub API，验证 commit/Issue 后保存快照，不再注册 key，不修改远端。
 
 Goal 包含目标、修改范围、不包含、验收标准、建议执行计划、待确认事项。它是基于 Issue 快照的草案，不表示已经检索源码、修改代码或跑过测试。修改始终使用相同快照、上一版本与本次反馈；历史版本及批准记录保留。修改会立即撤销旧批准，失败也不会恢复。存在待确认事项仍可明确批准，但不代表执行前置条件已满足。
+
+「提出修改」默认收起，点击展开并聚焦输入框，再次点击「收起修改」隐藏；收起保留未提交草稿，切换对话或登录会话才清空。展开/收起本身不会发起生成，也不会撤销批准。生成中使用轻量草案卡与简短说明，不显示虚假进度或阶段；减少动态效果偏好下关闭加载动画。桌面与手机已验证草稿保留、键盘展开、对话切换隔离和无横向溢出，前端生产构建通过。
 
 状态为 `draft → generating → awaiting_approval → approved`；生成失败为 `generation_failed`，仅手动重试。非流式 Chat Completions 总时限 60 秒，响应上限 256 KiB；来源读取最多 35 秒，Issue 正文超过 64 KiB 明确拒绝。90 秒数据库租期在读取或写入时恢复中断生成，无后台队列或自动重试。Nginx `/api/` 读取超时为 120 秒。
 

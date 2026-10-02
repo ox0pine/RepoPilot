@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NInput, NSkeleton, NSpin } from 'naive-ui'
-import { CheckCircle2, Copy, ExternalLink, MessageSquare } from '@lucide/vue'
+import { NButton, NInput, NSkeleton } from 'naive-ui'
+import { CheckCircle2, Copy, ExternalLink, LoaderCircle, MessageSquare } from '@lucide/vue'
 import GoalCard from '../components/GoalCard.vue'
 import { ApiError } from '../api/client'
 import { approveGoal, generateGoal, getTask, type GenerationAction, type TaskDetail, type TaskGoal, type TaskStatus } from '../api/tasks'
@@ -17,6 +17,7 @@ const actionError = ref('')
 const needsSettings = ref(false)
 const busy = ref<'generate' | 'revise' | 'retry' | 'approve' | null>(null)
 const feedback = ref('')
+const feedbackOpen = ref(false)
 const feedbackInput = ref<InstanceType<typeof NInput> | null>(null)
 const timelineEnd = ref<HTMLElement | null>(null)
 const announcement = ref('')
@@ -148,7 +149,13 @@ async function perform(action: GenerationAction | 'approve'): Promise<void> {
     }
   }
 }
-async function focusFeedback(): Promise<void> { await nextTick(); feedbackInput.value?.focus() }
+async function toggleFeedback(): Promise<void> {
+  feedbackOpen.value = !feedbackOpen.value
+  if (feedbackOpen.value) {
+    await nextTick()
+    feedbackInput.value?.focus()
+  }
+}
 function feedbackKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
     event.preventDefault()
@@ -170,6 +177,7 @@ watch(() => [props.taskId, sessionVersion()] as const, async () => {
   const identity = epoch
   task.value = null
   feedback.value = ''
+  feedbackOpen.value = false
   readError.value = ''
   actionError.value = ''
   needsSettings.value = false
@@ -200,8 +208,8 @@ onBeforeUnmount(resetRequests)
           <div class="message-meta"><span>{{ message.kind === 'source' ? '来源摘要' : message.kind === 'feedback' ? '你的修改意见' : message.kind === 'approval' ? `批准记录 · v${message.goal_version}` : `目标草案 · v${message.goal_version}` }}</span><time :datetime="message.created_at">{{ formatDate(message.created_at) }}</time></div>
           <template v-if="message.kind === 'goal'">
             <template v-if="goalFor(message.goal_version)">
-              <GoalCard v-if="message.goal_version === task.current_goal_version" :goal="goalFor(message.goal_version)!" current :can-approve="task.status === 'awaiting_approval'" :can-revise="canRevise" :busy="!!busy || generating" :approved="task.status === 'approved' && task.approved_goal_version === message.goal_version" @approve="perform('approve')" @revise="focusFeedback" />
-              <details v-else class="history-goal"><summary>查看历史目标 v{{ message.goal_version }}（不可批准）</summary><GoalCard :goal="goalFor(message.goal_version)!" :current="false" :can-approve="false" :can-revise="false" :busy="false" :approved="false" /></details>
+              <GoalCard v-if="message.goal_version === task.current_goal_version" :goal="goalFor(message.goal_version)!" current :can-approve="task.status === 'awaiting_approval'" :can-revise="canRevise" :feedback-open="feedbackOpen" :busy="!!busy || generating" :approved="task.status === 'approved' && task.approved_goal_version === message.goal_version" @approve="perform('approve')" @revise="toggleFeedback" />
+              <details v-else class="history-goal"><summary>查看历史目标 v{{ message.goal_version }}（不可批准）</summary><GoalCard :goal="goalFor(message.goal_version)!" :current="false" :can-approve="false" :can-revise="false" :feedback-open="false" :busy="false" :approved="false" /></details>
             </template>
             <p v-else class="error-notice">该目标版本无法读取，请重新读取对话。</p>
           </template>
@@ -209,11 +217,19 @@ onBeforeUnmount(resetRequests)
         </li>
       </ol>
       <div v-if="task.status === 'approved'" class="success-notice" role="status"><CheckCircle2 :size="20" aria-hidden="true" /><div><strong>目标已批准</strong><p>代码执行尚未接入。批准仅确认当前目标，不会启动进程、修改或推送代码。</p></div></div>
-      <div v-if="generating" class="progress-notice" role="status"><NSpin size="small" /><div><strong>正在根据 Issue 生成目标</strong><p>请等待完整目标返回；此时不能批准或重复提交修改。</p></div></div>
+      <section v-if="generating" class="generation-card" role="status" aria-live="polite" aria-atomic="true">
+        <div class="generation-heading">
+          <span class="generation-icon" aria-hidden="true"><LoaderCircle :size="20" :stroke-width="1.75" /></span>
+          <div class="generation-copy"><h2>{{ task.current_goal_version ? '正在更新目标' : '正在生成目标' }}</h2><p>{{ task.current_goal_version ? '结合你的修改意见，调整目标与验收标准。' : '根据 Issue 整理目标、修改范围与验收标准。' }}</p></div>
+          <span class="generation-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </div>
+        <div class="generation-preview" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="generation-note">生成完成后，将在这里显示可审阅的目标草案。</p>
+      </section>
       <div v-if="actionError" class="error-notice" role="alert"><p>{{ actionError }}</p><NButton v-if="needsSettings" @click="emit('settings')">打开设置</NButton></div>
       <div v-if="task.status === 'generation_failed' && !generating" class="error-notice" role="alert"><div><strong>目标生成失败</strong><p>{{ task.last_error || '目标生成未完成，请显式重试。' }}</p><p v-if="task.current_goal_version">旧目标仅供参考，不能批准失败修改前的版本。</p></div><NButton :disabled="!!busy" @click="perform('retry')">重试生成</NButton></div>
       <div v-if="task.status === 'draft' && !generating" class="draft-actions"><p>来源已保存，可以开始生成目标。刷新页面不会自动重复生成。</p><NButton type="primary" :disabled="!!busy" @click="perform('generate')">生成目标</NButton></div>
-      <section v-if="task.current_goal_version" class="feedback-card" aria-labelledby="feedback-title">
+      <section v-if="task.current_goal_version" v-show="feedbackOpen" id="goal-feedback-panel" class="feedback-card" aria-labelledby="feedback-title">
         <h2 id="feedback-title">提出修改</h2><p v-if="task.status === 'approved'" class="revocation-note">提交修改将立即撤销当前批准；即使重新生成失败，也不会恢复旧批准。</p>
         <label for="goal-feedback">需要调整的内容</label>
         <NInput ref="feedbackInput" v-model:value="feedback" type="textarea" placeholder="说明需要调整的目标、范围或验收标准" :autosize="{ minRows: 4, maxRows: 12 }" :disabled="!!busy || generating || !canRevise" :input-props="{ id: 'goal-feedback', 'aria-describedby': 'feedback-help' }" @keydown="feedbackKeydown" />
@@ -258,15 +274,34 @@ code { font-size: 12px; background: var(--code-bg); border-radius: 4px; padding:
 .approval-note { flex-basis: 100%; font-size: 12px; }
 .history-goal > summary { cursor: pointer; color: var(--text-secondary); padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .history-goal[open] > summary { margin-bottom: 10px; }
-.error-notice, .success-notice, .progress-notice, .draft-actions { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-radius: 12px; margin-bottom: 24px; }
+.error-notice, .success-notice, .draft-actions { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-radius: 12px; margin-bottom: 24px; }
 .error-notice { color: var(--danger-text); background: var(--danger-bg); }
 .success-notice { color: var(--success-text); background: var(--success-bg); }
-.progress-notice { color: var(--accent); background: var(--accent-soft); }
 .draft-actions { background: var(--surface); border: 1px solid var(--border); align-items: center; justify-content: space-between; }
-.error-notice p, .success-notice p, .progress-notice p, .draft-actions p { margin: 4px 0 0; }
+.error-notice p, .success-notice p, .draft-actions p { margin: 4px 0 0; }
 .error-notice > p { flex: 1; min-width: 0; }
 .success-notice > svg { flex-shrink: 0; }
-.success-notice > div, .progress-notice > div { min-width: 0; flex: 1; }
+.success-notice > div { min-width: 0; flex: 1; }
+.generation-card { padding: 22px 24px; margin-bottom: 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.generation-heading { display: flex; align-items: center; gap: 14px; }
+.generation-icon { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
+.generation-icon svg { animation: generation-spin 2s linear infinite; }
+.generation-copy { flex: 1; min-width: 0; }
+.generation-copy h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.6; }
+.generation-copy p { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.generation-dots { display: flex; flex-shrink: 0; gap: 4px; padding-left: 8px; }
+.generation-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--text-muted); animation: generation-pulse 1.8s ease-in-out infinite; }
+.generation-dots i:nth-child(2) { animation-delay: .2s; }
+.generation-dots i:nth-child(3) { animation-delay: .4s; }
+.generation-preview { display: grid; gap: 9px; max-width: 440px; margin: 22px 0 18px 54px; }
+.generation-preview span { display: block; height: 7px; border-radius: 4px; background: var(--surface-hover); }
+.generation-preview span:nth-child(2) { width: 86%; }
+.generation-preview span:nth-child(3) { width: 58%; }
+.generation-note { margin: 0 0 0 54px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+@keyframes generation-spin { to { transform: rotate(360deg); } }
+@keyframes generation-pulse { 0%, 100% { opacity: .3; } 50% { opacity: .8; } }
+@media (prefers-reduced-motion: reduce) { .generation-icon svg, .generation-dots i { animation: none; } }
+@media (max-width: 480px) { .generation-card { padding: 18px 16px; } .generation-heading { align-items: flex-start; gap: 12px; } .generation-dots { display: none; } .generation-preview { margin-left: 52px; } .generation-note { margin-left: 52px; } }
 .feedback-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 h2 { margin: 0 0 16px; font-size: 17px; }
 label { display: block; margin-bottom: 8px; color: var(--text-secondary); font-size: 13px; }

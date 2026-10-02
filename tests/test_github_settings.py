@@ -397,29 +397,86 @@ async def test_wrong_key_cannot_read_or_overwrite(database, repository):
 
 
 async def test_routes_require_authentication(route_client):
-    for method, payload in [('GET', None), ('PUT', {'api_token': MARKER_TOKEN})]:
-        response = await route_client.request(method, '/api/settings/github', json=payload, headers={'Authorization': ''})
+    for method, path, payload in [
+        ('GET', '/api/settings/github', None),
+        ('PUT', '/api/settings/github', {'api_token': MARKER_TOKEN}),
+        ('POST', '/api/settings/github/authorize', None),
+    ]:
+        response = await route_client.request(method, path, json=payload, headers={'Authorization': ''})
         assert response.status_code == 401
 
 
-async def test_route_autogenerates_registers_and_reuses_after_restart(route_app, repository):
-    async with route_app() as client:
+async def test_save_and_replace_token_never_contact_github(route_app, database, repository):
+    requests = []
+
+    def unexpected_github_request(request):
+        requests.append(request)
+        return httpx.Response(401)
+
+    async with route_app(github_transport=httpx.MockTransport(unexpected_github_request)) as client:
         response = await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})
         assert response.status_code == 200
-        result = response.json()
-        settings = result['settings']
+        settings = response.json()
         assert set(settings) == {'public_key', 'private_key_configured', 'api_token_configured'}
         assert settings['private_key_configured'] and settings['api_token_configured']
+        private = (await repository.load()).private_key.get_secret_value()
+        assert private not in response.text and MARKER_TOKEN not in response.text
+        before = await stored_row(database)
+        replacement = await client.put('/api/settings/github', json={'api_token': 'replacement-token'})
+        assert replacement.status_code == 200 and replacement.json() == settings
+        assert (await repository.load()).api_token.get_secret_value() == 'replacement-token'
+        assert (await stored_row(database))[:2] == before[:2]
+        assert requests == []
+
+
+async def test_authorize_reuses_saved_pair_without_writes_after_restart(route_app, database, repository):
+    async with route_app() as client:
+        settings = (await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})).json()
+        before = await stored_row(database)
+        response = await client.post('/api/settings/github/authorize')
+        assert response.status_code == 200
+        result = response.json()
+        assert result['settings'] == settings
         assert result['registration']['status'] == 'created'
         assert result['registration']['public_key'] == settings['public_key']
         private = (await repository.load()).private_key.get_secret_value()
         assert private not in response.text and MARKER_TOKEN not in response.text
+        assert await stored_row(database) == before
     async with route_app() as client:
         assert (await client.get('/api/settings/github')).json() == settings
-        retry = await client.put('/api/settings/github', json={})
+        retry = await client.post('/api/settings/github/authorize')
         assert retry.json()['settings'] == settings
         assert retry.json()['registration']['status'] == 'already_exists'
+        assert await stored_row(database) == before
         assert (await client.post('/api/settings/github/public-key')).status_code == 404
+
+
+@pytest.mark.parametrize('missing', ['all', 'token', 'public_key', 'private_key'])
+async def test_authorize_requires_saved_credentials_without_writes_or_network(route_app, database, repository, missing):
+    if missing != 'all':
+        await repository.save(GitHubSettingsUpdate(api_token=MARKER_TOKEN))
+        async with database.session() as session, session.begin():
+            row = await session.scalar(select(GitHubSettingsRow).with_for_update())
+            if missing == 'token':
+                row.api_token_ciphertext = ''
+            elif missing == 'public_key':
+                row.public_key = ''
+            else:
+                row.private_key_ciphertext = ''
+    before = await stored_row(database)
+    requests = []
+
+    def unexpected_github_request(request):
+        requests.append(request)
+        return httpx.Response(401)
+
+    async with route_app(github_transport=httpx.MockTransport(unexpected_github_request)) as client:
+        response = await client.post('/api/settings/github/authorize')
+        assert response.status_code == 422
+        assert 'Save' in response.json()['detail']
+        assert MARKER_TOKEN not in response.text
+        assert requests == []
+    assert await stored_row(database) == before
 
 
 @pytest.mark.parametrize('payload', [
@@ -438,8 +495,12 @@ async def test_route_rejects_legacy_fields_and_redacts_secrets(route_client, dat
 @pytest.mark.parametrize('master_key', [None, '', ' ', 'invalid-key'])
 async def test_missing_master_key_only_disables_github(route_app, master_key):
     async with route_app(master_key=master_key) as client:
-        for method, payload in [('GET', None), ('PUT', {'api_token': MARKER_TOKEN})]:
-            response = await client.request(method, '/api/settings/github', json=payload)
+        for method, path, payload in [
+            ('GET', '/api/settings/github', None),
+            ('PUT', '/api/settings/github', {'api_token': MARKER_TOKEN}),
+            ('POST', '/api/settings/github/authorize', None),
+        ]:
+            response = await client.request(method, path, json=payload)
             assert response.status_code == 503
             assert MARKER_TOKEN not in response.text
         assert (await client.post('/api/auth')).status_code == 200
@@ -453,6 +514,7 @@ async def test_wrong_key_route_cannot_mutate_saved_credentials(route_app, databa
     async with route_app(master_key=Fernet.generate_key()) as client:
         assert (await client.get('/api/settings/github')).status_code == 500
         assert (await client.put('/api/settings/github', json={'api_token': 'replacement'})).status_code == 500
+        assert (await client.post('/api/settings/github/authorize')).status_code == 500
     assert await stored_row(database) == before
 
 
@@ -460,7 +522,7 @@ async def test_timeout_after_remote_create_preserves_pair_and_retry_converges(ro
     keys = []
     posts = []
     async def github(request):
-        # Acquiring the row lock here proves the save transaction ended before network I/O.
+        # Authorization must not hold a database write lock during network I/O.
         async with database.session() as session, session.begin():
             await session.execute(text("SET LOCAL lock_timeout = '1s'"))
             row = await session.scalar(select(GitHubSettingsRow).with_for_update())
@@ -476,23 +538,29 @@ async def test_timeout_after_remote_create_preserves_pair_and_retry_converges(ro
         keys.append({'id': 101, 'key': body['key']})
         raise httpx.ReadTimeout('secret-remote-error', request=request)
     async with route_app(github_transport=httpx.MockTransport(github)) as client:
-        response = await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})
-        assert response.status_code == 502
-        assert response.json()['detail'].startswith('GitHub settings were saved, but public key registration failed: ')
-        assert MARKER_TOKEN not in response.text and 'secret-remote-error' not in response.text
+        saved = await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})
+        assert saved.status_code == 200
         before = await stored_row(database)
-        retry = await client.put('/api/settings/github', json={})
+        response = await client.post('/api/settings/github/authorize')
+        assert response.status_code == 502
+        assert MARKER_TOKEN not in response.text and 'secret-remote-error' not in response.text
+        assert await stored_row(database) == before
+        retry = await client.post('/api/settings/github/authorize')
         assert retry.status_code == 200 and retry.json()['registration']['status'] == 'already_exists'
         assert len(posts) == 1 and await stored_row(database) == before
 
 
-async def test_upstream_unauthorized_preserves_local_configuration_and_session(route_app):
+async def test_upstream_unauthorized_preserves_local_configuration_and_session(route_app, database):
     async with route_app(github_transport=httpx.MockTransport(lambda request: httpx.Response(401))) as client:
-        response = await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})
+        saved = await client.put('/api/settings/github', json={'api_token': MARKER_TOKEN})
+        assert saved.status_code == 200
+        before = await stored_row(database)
+        response = await client.post('/api/settings/github/authorize')
         assert response.status_code == 502
         assert MARKER_TOKEN not in response.text
         current = await client.get('/api/settings/github')
-        assert current.json()['private_key_configured'] and current.json()['api_token_configured']
+        assert current.json() == saved.json()
+        assert await stored_row(database) == before
         assert (await client.post('/api/auth')).status_code == 200
 
 
@@ -535,6 +603,7 @@ async def test_real_route_storage_failure_returns_error(route_client, database):
         ("GET", "/api/settings/github", None, "Unable to load GitHub settings"),
         ("PUT", "/api/settings/github", {"api_token": MARKER_TOKEN},
          "Unable to save GitHub settings"),
+        ("POST", "/api/settings/github/authorize", None, "Unable to load GitHub settings"),
     ]:
         response = await route_client.request(method, path, json=payload)
         assert response.status_code == 500

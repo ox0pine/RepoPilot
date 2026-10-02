@@ -39,10 +39,14 @@ export type GitHubAuthorizationResult = {
   registration: GitHubPublicKeyResult
 }
 
-export function getGitHubSettings(): Promise<GitHubSettings> {
-  return request<GitHubSettings>('/api/settings/github')
+export function getGitHubSettings(signal?: AbortSignal): Promise<GitHubSettings> {
+  return request<GitHubSettings>('/api/settings/github', { signal })
 }
 
-export function updateGitHubSettings(payload: GitHubSettingsUpdate): Promise<GitHubAuthorizationResult> {
-  return request<GitHubAuthorizationResult>('/api/settings/github', { method: 'PUT', body: JSON.stringify(payload) })
+export function updateGitHubSettings(payload: GitHubSettingsUpdate, signal?: AbortSignal): Promise<GitHubSettings> {
+  return request<GitHubSettings>('/api/settings/github', { method: 'PUT', body: JSON.stringify(payload), signal })
+}
+
+export function authorizeGitHubSettings(signal?: AbortSignal): Promise<GitHubAuthorizationResult> {
+  return request<GitHubAuthorizationResult>('/api/settings/github/authorize', { method: 'POST', signal })
 }
