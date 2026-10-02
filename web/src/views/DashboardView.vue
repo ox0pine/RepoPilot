@@ -61,7 +61,7 @@ function formatDate(value: string): string {
       </div>
       <div v-else-if="!taskStore.listLoading && !taskStore.listError" class="empty-state"><MessagesSquare :size="32" :stroke-width="1.5" aria-hidden="true" /><h3>还没有对话</h3><p>填写仓库、commit 和 Issue，开始审阅你的第一个目标。</p><a class="new-link" href="/app/new" @click="followLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建对话</a></div>
     </section>
-    <p class="scope-note">批准仅确认目标，不会执行代码。代码执行尚未接入。</p>
+    <p class="scope-note">批准仅确认目标，不会自动执行代码。请在对话页单独开始执行，并审阅检查记录、报告和 Patch。</p>
   </div>
 </template>
 

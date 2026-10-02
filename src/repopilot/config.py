@@ -11,6 +11,7 @@ class AppSettings(BaseSettings):
         default="postgresql+asyncpg://repopilot:repopilot@127.0.0.1:5432/repopilot", repr=False
     )
     redis_url: str = Field(default="redis://127.0.0.1:6379/0", repr=False)
+    execution_image: str = Field(default="repopilot-dev:local", min_length=1, max_length=256)
 
     model_config = SettingsConfigDict(
         env_file=".env",

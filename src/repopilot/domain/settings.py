@@ -5,7 +5,7 @@ from typing import Literal
 
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -89,7 +89,7 @@ def normalize_ssh_public_key(value: str) -> str:
         if len(value.splitlines()) != 1:
             raise ValueError
         key = serialization.load_ssh_public_key(value.encode('utf-8'))
-        if not isinstance(key, (ed25519.Ed25519PublicKey, rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
+        if not isinstance(key, ed25519.Ed25519PublicKey):
             raise ValueError
         return key.public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
     except (ValueError, TypeError, UnsupportedAlgorithm):
@@ -98,11 +98,8 @@ def normalize_ssh_public_key(value: str) -> str:
 
 def _load_ssh_private_key(private_key: str):
     try:
-        loader = (serialization.load_ssh_private_key
-                  if private_key.startswith('-----BEGIN OPENSSH PRIVATE KEY-----')
-                  else serialization.load_pem_private_key)
-        key = loader(private_key.encode('utf-8'), password=None)
-        if not isinstance(key, (ed25519.Ed25519PrivateKey, rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey)):
+        key = serialization.load_ssh_private_key(private_key.encode('utf-8'), password=None)
+        if not isinstance(key, ed25519.Ed25519PrivateKey):
             raise ValueError
     except TypeError:
         raise InvalidGitHubSettingsError('Passphrase-protected SSH private keys are not supported') from None
@@ -114,8 +111,10 @@ def _load_ssh_private_key(private_key: str):
 def validate_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
     public_key = normalize_ssh_public_key(public_key)
     private_key = private_key.replace('\r\n', '\n').strip()
+    if not public_key and not private_key:
+        return '', ''
     if not private_key:
-        return public_key, ''
+        raise InvalidGitHubSettingsError('SSH private key is required when a public key is configured')
     private_key += '\n'
     key = _load_ssh_private_key(private_key)
     if not public_key:
@@ -127,7 +126,7 @@ def validate_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
 
 
 def ensure_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
-    if not private_key:
+    if not public_key and not private_key:
         key = ed25519.Ed25519PrivateKey.generate()
         return (
             key.public_key().public_bytes(
@@ -138,14 +137,7 @@ def ensure_ssh_pair(public_key: str, private_key: str) -> tuple[str, str]:
                 serialization.NoEncryption(),
             ).decode(),
         )
-    normalized_private = private_key.replace('\r\n', '\n').strip() + '\n'
-    if not public_key:
-        key = _load_ssh_private_key(normalized_private)
-        public_key = key.public_key().public_bytes(
-            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
-        ).decode()
-    public_key, _ = validate_ssh_pair(public_key, normalized_private)
-    # Preserve the saved secret byte-for-byte when reusing a valid legacy pair.
+    validate_ssh_pair(public_key, private_key)
     return public_key, private_key
 
 

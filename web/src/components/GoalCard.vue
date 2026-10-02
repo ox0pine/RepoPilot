@@ -30,7 +30,7 @@ const sections = computed(() => [
       <span v-if="approved" class="approved-label">已批准</span>
     </header>
     <div class="goal-content">
-      <p class="draft-note">基于固定来源的目标草案与建议计划；尚未检索项目代码或验证计划可执行性。</p>
+      <p class="draft-note">请结合来源卡中的已读文件和覆盖说明审阅；计划尚未经执行验证。</p>
       <section><h3>目标</h3><p class="goal-summary">{{ goal.content.summary }}</p></section>
       <section v-for="section in sections" :key="section.title">
         <h3>{{ section.title }}</h3>

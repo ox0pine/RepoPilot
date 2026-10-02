@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NInput, NSkeleton } from 'naive-ui'
 import { CheckCircle2, Copy, ExternalLink, LoaderCircle, MessageSquare } from '@lucide/vue'
 import GoalCard from '../components/GoalCard.vue'
+import RunPanel from '../components/RunPanel.vue'
 import { ApiError } from '../api/client'
 import { approveGoal, generateGoal, getTask, type GenerationAction, type TaskDetail, type TaskGoal, type TaskStatus } from '../api/tasks'
 import { sessionToken, sessionVersion } from '../stores/session'
@@ -16,6 +17,7 @@ const readError = ref('')
 const actionError = ref('')
 const needsSettings = ref(false)
 const busy = ref<'generate' | 'revise' | 'retry' | 'approve' | null>(null)
+const runActive = ref(false)
 const feedback = ref('')
 const feedbackOpen = ref(false)
 const feedbackInput = ref<InstanceType<typeof NInput> | null>(null)
@@ -31,7 +33,7 @@ const statuses: Record<TaskStatus, string> = {
   draft: '待生成', generating: '生成中', awaiting_approval: '待批准', approved: '已批准', generation_failed: '生成失败',
 }
 const generating = computed(() => task.value?.status === 'generating' || (busy.value !== null && busy.value !== 'approve'))
-const canRevise = computed(() => !!task.value?.current_goal_version && ['awaiting_approval', 'approved', 'generation_failed'].includes(task.value.status))
+const canRevise = computed(() => !runActive.value && !!task.value?.current_goal_version && ['awaiting_approval', 'approved', 'generation_failed'].includes(task.value.status))
 const canSubmitFeedback = computed(() => canRevise.value && !busy.value && !generating.value && !!feedback.value.trim() && feedback.value.trim().length <= 8000)
 const messages = computed(() => [...(task.value?.messages ?? [])].sort((a, b) => a.id - b.id))
 const goals = computed(() => new Map(task.value?.goals.map(goal => [goal.version, goal]) ?? []))
@@ -107,7 +109,7 @@ async function loadDetail(force = false): Promise<boolean> {
   }
 }
 async function perform(action: GenerationAction | 'approve'): Promise<void> {
-  if (!task.value || busy.value || task.value.status === 'generating') return
+  if (!task.value || busy.value || runActive.value || task.value.status === 'generating') return
   if (action === 'revise' && !canSubmitFeedback.value) return
   const current = task.value
   const sentFeedback = feedback.value.trim()
@@ -132,7 +134,7 @@ async function perform(action: GenerationAction | 'approve'): Promise<void> {
     if (!context.current()) return
     if (action === 'revise') feedback.value = ''
     emit('changed')
-    announcement.value = action === 'approve' ? '目标已批准，代码执行尚未接入' : '新目标已生成，请审阅并批准'
+    announcement.value = action === 'approve' ? '目标已批准；开始执行需要单独确认' : '新目标已生成，请审阅并批准'
   } catch (error) {
     if (!context.current()) return
     actionError.value = error instanceof ApiError && error.status === 409 ? '目标已更新，请重新确认' : errorText(error)
@@ -172,10 +174,15 @@ async function copyCommit(): Promise<void> {
     if (identity === epoch) announcement.value = '复制失败，请选择并复制完整 SHA'
   }
 }
+async function executionChanged(): Promise<void> {
+  emit('changed')
+  await loadDetail(true)
+}
 watch(() => [props.taskId, sessionVersion()] as const, async () => {
   resetRequests()
   const identity = epoch
   task.value = null
+  runActive.value = false
   feedback.value = ''
   feedbackOpen.value = false
   readError.value = ''
@@ -202,13 +209,23 @@ onBeforeUnmount(resetRequests)
         <div class="source-row"><span class="source-label">Issue</span><a :href="safeLink(task.issue_url)" target="_blank" rel="noopener noreferrer">{{ task.issue_url }}<ExternalLink :size="14" aria-hidden="true" /></a></div>
         <div class="source-row"><span class="source-label">Commit</span><code>{{ task.baseline_commit }}</code><NButton size="small" aria-label="复制完整 commit SHA" @click="copyCommit"><Copy :size="14" aria-hidden="true" />复制</NButton></div>
         <p class="source-note">来源快照固定于 {{ formatDate(task.source_snapshot.fetched_at) }}。更换仓库、commit 或 Issue 请新建对话。</p>
+        <details class="repository-context">
+          <summary>查看已保存源码上下文与覆盖说明</summary>
+          <p>上下文 Commit：<code>{{ task.source_snapshot.repository_context.commit }}</code></p>
+          <p>只读取下列文件；文件树不是已读源码证据，目标计划尚未经执行验证。最多保存 500 条树路径、12 个文件；单文件注入最多 16 KiB，总注入最多 64 KiB。</p>
+          <p v-if="task.source_snapshot.repository_context.tree_truncated">文件树已截断。</p>
+          <ul><li v-for="(omission, index) in task.source_snapshot.repository_context.omissions" :key="index">{{ omission }}</li></ul>
+          <p v-if="!task.source_snapshot.repository_context.files.length">未保存源码文件；请结合覆盖说明审阅。</p>
+          <details v-for="file in task.source_snapshot.repository_context.files" :key="file.path"><summary>{{ file.path }}{{ file.truncated ? '（内容已截断）' : '' }}</summary><p>{{ file.reason }}</p><p>Blob SHA：<code>{{ file.blob_sha }}</code></p><pre>{{ file.content }}</pre></details>
+          <details><summary>已保存文件树（不等于已读源码）</summary><pre>{{ task.source_snapshot.repository_context.tree.join('\n') }}</pre></details>
+        </details>
       </section>
       <ol class="timeline" aria-label="对话历史">
         <li v-for="message in messages" :key="message.id" class="timeline-item">
           <div class="message-meta"><span>{{ message.kind === 'source' ? '来源摘要' : message.kind === 'feedback' ? '你的修改意见' : message.kind === 'approval' ? `批准记录 · v${message.goal_version}` : `目标草案 · v${message.goal_version}` }}</span><time :datetime="message.created_at">{{ formatDate(message.created_at) }}</time></div>
           <template v-if="message.kind === 'goal'">
             <template v-if="goalFor(message.goal_version)">
-              <GoalCard v-if="message.goal_version === task.current_goal_version" :goal="goalFor(message.goal_version)!" current :can-approve="task.status === 'awaiting_approval'" :can-revise="canRevise" :feedback-open="feedbackOpen" :busy="!!busy || generating" :approved="task.status === 'approved' && task.approved_goal_version === message.goal_version" @approve="perform('approve')" @revise="toggleFeedback" />
+              <GoalCard v-if="message.goal_version === task.current_goal_version" :goal="goalFor(message.goal_version)!" current :can-approve="task.status === 'awaiting_approval' && !runActive" :can-revise="canRevise" :feedback-open="feedbackOpen" :busy="!!busy || generating || runActive" :approved="task.status === 'approved' && task.approved_goal_version === message.goal_version" @approve="perform('approve')" @revise="toggleFeedback" />
               <details v-else class="history-goal"><summary>查看历史目标 v{{ message.goal_version }}（不可批准）</summary><GoalCard :goal="goalFor(message.goal_version)!" :current="false" :can-approve="false" :can-revise="false" :feedback-open="false" :busy="false" :approved="false" /></details>
             </template>
             <p v-else class="error-notice">该目标版本无法读取，请重新读取对话。</p>
@@ -216,7 +233,7 @@ onBeforeUnmount(resetRequests)
           <div v-else class="message-card" :class="message.kind"><CheckCircle2 v-if="message.kind === 'approval'" :size="18" aria-hidden="true" /><MessageSquare v-else-if="message.kind === 'feedback'" :size="18" aria-hidden="true" /><p>{{ message.text }}</p><span v-if="message.kind === 'approval'" class="approval-note">历史批准记录 · 不代表代码已执行</span></div>
         </li>
       </ol>
-      <div v-if="task.status === 'approved'" class="success-notice" role="status"><CheckCircle2 :size="20" aria-hidden="true" /><div><strong>目标已批准</strong><p>代码执行尚未接入。批准仅确认当前目标，不会启动进程、修改或推送代码。</p></div></div>
+      <div v-if="task.status === 'approved'" class="success-notice" role="status"><CheckCircle2 :size="20" aria-hidden="true" /><div><strong>目标已批准</strong><p>批准不会自动执行，请单独开始执行。批准仅确认当前目标，不会自动修改或推送代码。</p></div></div>
       <section v-if="generating" class="generation-card" role="status" aria-live="polite" aria-atomic="true">
         <div class="generation-heading">
           <span class="generation-icon" aria-hidden="true"><LoaderCircle :size="20" :stroke-width="1.75" /></span>
@@ -227,8 +244,8 @@ onBeforeUnmount(resetRequests)
         <p class="generation-note">生成完成后，将在这里显示可审阅的目标草案。</p>
       </section>
       <div v-if="actionError" class="error-notice" role="alert"><p>{{ actionError }}</p><NButton v-if="needsSettings" @click="emit('settings')">打开设置</NButton></div>
-      <div v-if="task.status === 'generation_failed' && !generating" class="error-notice" role="alert"><div><strong>目标生成失败</strong><p>{{ task.last_error || '目标生成未完成，请显式重试。' }}</p><p v-if="task.current_goal_version">旧目标仅供参考，不能批准失败修改前的版本。</p></div><NButton :disabled="!!busy" @click="perform('retry')">重试生成</NButton></div>
-      <div v-if="task.status === 'draft' && !generating" class="draft-actions"><p>来源已保存，可以开始生成目标。刷新页面不会自动重复生成。</p><NButton type="primary" :disabled="!!busy" @click="perform('generate')">生成目标</NButton></div>
+      <div v-if="task.status === 'generation_failed' && !generating" class="error-notice" role="alert"><div><strong>目标生成失败</strong><p>{{ task.last_error || '目标生成未完成，请显式重试。' }}</p><p v-if="task.current_goal_version">旧目标仅供参考，不能批准失败修改前的版本。</p></div><NButton :disabled="!!busy || runActive" @click="perform('retry')">重试生成</NButton></div>
+      <div v-if="task.status === 'draft' && !generating" class="draft-actions"><p>来源已保存，可以开始生成目标。刷新页面不会自动重复生成。</p><NButton type="primary" :disabled="!!busy || runActive" @click="perform('generate')">生成目标</NButton></div>
       <section v-if="task.current_goal_version" v-show="feedbackOpen" id="goal-feedback-panel" class="feedback-card" aria-labelledby="feedback-title">
         <h2 id="feedback-title">提出修改</h2><p v-if="task.status === 'approved'" class="revocation-note">提交修改将立即撤销当前批准；即使重新生成失败，也不会恢复旧批准。</p>
         <label for="goal-feedback">需要调整的内容</label>
@@ -236,6 +253,7 @@ onBeforeUnmount(resetRequests)
         <div class="feedback-footer"><p id="feedback-help">Ctrl / Cmd + Enter 提交，Enter 换行 · 最多 8,000 字符</p><NButton type="primary" :disabled="!canSubmitFeedback" :loading="busy === 'revise'" @click="perform('revise')">修改并重新生成</NButton></div>
         <p v-if="feedback.trim().length > 8000" class="feedback-error" role="alert">修改意见不能超过 8,000 字符，请缩短后提交。</p>
       </section>
+      <RunPanel v-if="task.current_goal_version" :key="task.id" :task-id="task.id" :revision="task.revision" :goal-version="task.current_goal_version" :approved="task.status === 'approved' && task.approved_goal_version === task.current_goal_version && !busy && !generating" @active="runActive = $event" @changed="executionChanged" />
       <div ref="timelineEnd" class="timeline-end" aria-hidden="true" />
     </template>
   </div>
@@ -262,6 +280,9 @@ a:hover { text-decoration: underline; }
 a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 code { font-size: 12px; background: var(--code-bg); border-radius: 4px; padding: 3px 6px; overflow-wrap: anywhere; min-width: 0; }
 .source-note { margin: 14px 0 0; font-size: 12px; color: var(--text-muted); }
+.repository-context { margin-top: 16px; font-size: 12px; line-height: 1.7; }
+.repository-context summary { cursor: pointer; padding: 8px 0; }
+.repository-context pre { padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 320px; overflow-y: auto; background: var(--code-bg); border-radius: 6px; }
 .timeline { list-style: none; padding: 0; margin: 0; }
 .timeline-item { margin-bottom: 24px; }
 .message-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-bottom: 8px; color: var(--text-muted); font-size: 12px; }

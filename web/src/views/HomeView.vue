@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { NButton, NCard, NTag } from 'naive-ui'
+import { NButton, NCard } from 'naive-ui'
 import { Activity, ArrowRight, GitPullRequest, ListChecks } from '@lucide/vue'
 import BrandMark from '../components/BrandMark.vue'
 
 const emit = defineEmits<{ navigateAuth: [] }>()
-const plannedSteps = [
-  { number: '01', title: '描述任务', description: '明确目标、项目背景与验收要求，让下一步有据可依。', icon: ListChecks },
-  { number: '02', title: '观察执行', description: '了解任务推进过程，在需要时补充反馈与调整方向。', icon: Activity },
-  { number: '03', title: '审查变更', description: '结合代码差异与验证结果，审查改动并决定如何交付。', icon: GitPullRequest },
+const steps = [
+  { number: '01', title: '固定来源与批准目标', description: '固定仓库、commit 与 Issue，查看源码上下文并人工批准目标。', icon: ListChecks },
+  { number: '02', title: '查看工具结果和检查记录', description: '显式开始执行，查看实际工具日志、基线与最终检查结果。', icon: Activity },
+  { number: '03', title: '查看差异并下载 Patch', description: '审阅代码差异和报告，下载 Patch 后由你决定如何交付。', icon: GitPullRequest },
 ]
 </script>
 
@@ -31,15 +31,14 @@ const plannedSteps = [
       </section>
       <section class="workflow-section" aria-labelledby="workflow-title">
         <div class="section-heading">
-          <h2 id="workflow-title">下一步，让任务连成流程</h2>
-          <p>以下流程正在规划，尚未开放。</p>
+          <h2 id="workflow-title">从目标到成果审阅</h2>
+          <p>执行需先准备 Docker 环境，结果仍需人工审阅。</p>
         </div>
-        <ol class="home-steps" aria-label="规划中的任务流程">
-          <li v-for="step in plannedSteps" :key="step.number">
+        <ol class="home-steps" aria-label="任务流程">
+          <li v-for="step in steps" :key="step.number">
             <NCard class="step-card">
               <div class="step-heading">
                 <component :is="step.icon" :size="20" :stroke-width="1.75" aria-hidden="true" />
-                <NTag size="small" :bordered="false">规划中</NTag>
               </div>
               <p class="step-number">{{ step.number }}</p>
               <h3>{{ step.title }}</h3>
@@ -48,7 +47,7 @@ const plannedSteps = [
           </li>
         </ol>
       </section>
-      <footer class="execution-boundary">当前可用：登录、模型设置与 GitHub 授权。任务执行与流式对话建设中。</footer>
+      <footer class="execution-boundary">批准不会自动执行；每次执行从固定 commit 重新开始。检查通过不代表独立验收，代码差异与报告仍需人工审阅。</footer>
     </main>
   </div>
 </template>

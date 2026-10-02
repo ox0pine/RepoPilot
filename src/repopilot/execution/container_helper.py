@@ -1,0 +1,283 @@
+"""Trusted program sent by the controller to python3; never loaded from the repository."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path('/workspace')
+MAX_FILE = 1024 * 1024
+
+
+def path(value: str, *, new: bool = False) -> Path:
+    if not isinstance(value, str) or not value or '\x00' in value:
+        raise ValueError('Invalid workspace path')
+    parts = value.split('/')
+    if value.startswith('/') or any(p in ('', '..') for p in parts):
+        raise ValueError('Path must be relative without traversal')
+    target = ROOT
+    for index, part in enumerate(parts):
+        if part == '.':
+            continue
+        target = target / part
+        try:
+            mode = target.lstat().st_mode
+        except FileNotFoundError:
+            if new and index == len(parts) - 1:
+                return target
+            raise ValueError('Path does not exist') from None
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise ValueError('Links and special files are forbidden')
+        if index != len(parts) - 1 and not stat.S_ISDIR(mode):
+            raise ValueError('Parent is not a directory')
+    return target
+
+
+def file_bytes(target: Path) -> bytes:
+    if not target.is_file() or target.stat().st_size > MAX_FILE:
+        raise ValueError('Expected a regular file at most 1 MiB')
+    data = target.read_bytes()
+    if len(data) > MAX_FILE:
+        raise ValueError('File exceeds 1 MiB')
+    return data
+
+
+def residuals() -> list[int]:
+    result = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or int(entry.name) in (1, os.getpid()):
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            if fields[0] != 'Z':
+                result.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return result
+
+
+def stop_residuals() -> None:
+    # Also catch detached sessions/double forks, not just the original process group.
+    for _ in range(20):
+        remaining = residuals()
+        if not remaining:
+            return
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(.05)
+    raise RuntimeError('Unable to confirm command process cleanup')
+
+
+def shell(command: str, timeout: float) -> dict:
+    proc = subprocess.Popen(['/bin/sh', '-lc', command], cwd=ROOT,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    assert proc.stdout is not None
+    os.set_blocking(proc.stdout.fileno(), False)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    data = bytearray()
+    total = 0
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    try:
+        while proc.poll() is None:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            for key, _ in selector.select(.05):
+                chunk = os.read(key.fd, 65536)
+                total += len(chunk)
+                data.extend(chunk[:max(0, 32768 - len(data))])
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=2)
+        stop_residuals()
+        while True:
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            data.extend(chunk[:max(0, 32768 - len(data))])
+    finally:
+        selector.close()
+        proc.stdout.close()
+    return {'exit_code': None if timed_out else proc.returncode,
+            'output': data.decode('utf-8', errors='replace'), 'truncated': total > len(data),
+            'timed_out': timed_out}
+
+
+def execute(name: str, args: dict) -> dict:
+    if name == 'shell':
+        return shell(args['command'], args['timeout'])
+    target = path(args.get('path', '.'), new=name == 'write_file')
+    if name == 'read_file':
+        data = file_bytes(target)
+        text = data.decode('utf-8')
+        if '\x00' in text:
+            raise ValueError('Binary file cannot be read')
+        start, end = args.get('start_line', 1), args.get('end_line', 200)
+        if type(start) is not int or type(end) is not int or start < 1 or end < start or end - start >= 200:
+            raise ValueError('Read range must contain at most 200 lines')
+        lines = text.splitlines(keepends=True)
+        chosen = []
+        size = 0
+        partial = False
+        for line in lines[start - 1:end]:
+            encoded = line.encode('utf-8')
+            if size + len(encoded) > 16384:
+                remaining = encoded[:16384 - size].decode('utf-8', errors='ignore')
+                if remaining:
+                    chosen.append(remaining)
+                partial = True
+                break
+            chosen.append(line)
+            size += len(encoded)
+        return {'content': ''.join(chosen), 'sha256': hashlib.sha256(data).hexdigest(),
+                'start_line': start, 'end_line': start + len(chosen) - 1,
+                'truncated': partial or start - 1 + len(chosen) < len(lines)}
+    if name == 'search':
+        query = args['query']
+        if not isinstance(query, str) or not query or '\x00' in query:
+            raise ValueError('Search requires a nonempty literal string')
+        candidates = [target] if target.is_file() else sorted(target.rglob('*'))
+        matches = []
+        size = 0
+        for candidate in candidates:
+            try:
+                safe = path(candidate.relative_to(ROOT).as_posix())
+                if not safe.is_file():
+                    continue
+                text = file_bytes(safe).decode('utf-8')
+                if '\x00' in text:
+                    continue
+            except (ValueError, UnicodeError):
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if query in line:
+                    row = {'path': safe.relative_to(ROOT).as_posix(), 'line': number, 'content': line}
+                    row_size = len(json.dumps(row, ensure_ascii=False).encode())
+                    if len(matches) == 100 or size + row_size > 15000:
+                        return {'matches': matches, 'truncated': True}
+                    matches.append(row)
+                    size += row_size
+        return {'matches': matches, 'truncated': False}
+    if name == 'edit_file':
+        data = file_bytes(target)
+        if hashlib.sha256(data).hexdigest() != args['expected_sha256']:
+            raise ValueError('File changed; read it again before editing')
+        text = data.decode('utf-8')
+        old = args['old_text']
+        if not old or text.count(old) != 1:
+            raise ValueError('old_text must match exactly once')
+        result = text.replace(old, args['new_text'], 1).encode('utf-8')
+        if len(result) > MAX_FILE:
+            raise ValueError('File exceeds 1 MiB')
+        # O_EXCL prevents colliding with repository-controlled temporary paths.
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix='.repopilot-edit-', dir=target.parent)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(result)
+                os.fchmod(stream.fileno(), stat.S_IMODE(target.stat().st_mode))
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return {'sha256': hashlib.sha256(result).hexdigest()}
+    if name == 'write_file':
+        result = args['content'].encode('utf-8')
+        if len(result) > MAX_FILE:
+            raise ValueError('File exceeds 1 MiB')
+        with target.open('xb') as stream:
+            stream.write(result)
+        return {'sha256': hashlib.sha256(result).hexdigest()}
+    raise ValueError('Unknown workspace tool')
+
+
+def transfer(mode: str) -> None:
+    import shutil
+    import tarfile
+
+    if mode == 'import':
+        total = 0
+        seen = set()
+        with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
+            for index, member in enumerate(archive):
+                if index >= 20000 or member.name in seen:
+                    raise ValueError('Invalid source archive member set')
+                seen.add(member.name)
+                if not (member.isdir() or member.isreg()) or '.git' in member.name.split('/'):
+                    raise ValueError('Unsafe source archive member')
+                total += member.size
+                if total > 200 * 1024 * 1024:
+                    raise ValueError('Source archive exceeds limit')
+                target = path(member.name, new=True)
+                if member.isdir():
+                    target.mkdir(exist_ok=True)
+                else:
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise ValueError('Missing archive content')
+                    with stream, target.open('xb') as output:
+                        shutil.copyfileobj(stream, output, 65536)
+                    target.chmod(0o755 if member.mode & 0o111 else 0o644)
+        return
+    if mode != 'capture':
+        raise ValueError('Unknown archive transfer mode')
+    # The controller holds its exclusive operation lock and forbids future tools.
+    # Terminate all potential writers, including detached sessions, before reading.
+    # Only this trusted read-only serializer and the trusted sleeping PID1 remain.
+    stop_residuals()
+    total = 0
+    with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
+        for index, candidate in enumerate(sorted(ROOT.rglob('*'))):
+            if index >= 20000:
+                raise ValueError('Final archive has too many members')
+            name = candidate.relative_to(ROOT).as_posix()
+            safe = path(name)
+            if '.git' in name.split('/'):
+                raise ValueError('Final archive contains Git metadata')
+            info = archive.gettarinfo(str(safe), arcname=name)
+            total += info.size
+            if total > 200 * 1024 * 1024:
+                raise ValueError('Final archive exceeds limit')
+            if safe.is_file():
+                with safe.open('rb') as stream:
+                    archive.addfile(info, stream)
+            else:
+                archive.addfile(info)
+
+
+def main() -> None:
+    try:
+        if len(sys.argv) == 2:
+            try:
+                transfer(sys.argv[1])
+            except Exception:
+                print('Trusted archive transfer failed', file=sys.stderr)
+                raise SystemExit(1)
+            return
+        request = json.load(sys.stdin)
+        result = execute(request['name'], request['arguments'])
+        print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))
+    except (ValueError, UnicodeError, OSError) as exc:
+        print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
+    except Exception:
+        print(json.dumps({'ok': False, 'fatal': True, 'error': 'Container helper failed'}))
+
+
+if __name__ == '__main__':
+    main()

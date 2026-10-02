@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 
 import httpx
@@ -54,6 +55,16 @@ async def test_fetch_saves_only_validated_snapshot(payload: CreateTask, body: st
         requests.append(request)
         if "/commits/" in request.url.path:
             return httpx.Response(200, json={"sha": SHA, "unused_secret": UPSTREAM_SECRET})
+        if '/git/trees/' in request.url.path:
+            content = b'# Project\n'
+            blob_sha = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+            return httpx.Response(200, json={
+                'sha': 'c' * 40, 'truncated': False,
+                'tree': [{'path': 'README.md', 'type': 'blob', 'mode': '100644',
+                          'sha': blob_sha, 'size': len(content)}],
+            })
+        if '/git/blobs/' in request.url.path:
+            return httpx.Response(200, content=b'# Project\n')
         return httpx.Response(200, json=issue_row(body=body))
 
     snapshot = await GitHubSourceClient(transport=httpx.MockTransport(respond)).fetch(payload, TOKEN)
@@ -68,18 +79,22 @@ async def test_fetch_saves_only_validated_snapshot(payload: CreateTask, body: st
     assert before <= snapshot.fetched_at <= datetime.now(timezone.utc)
     assert UPSTREAM_SECRET not in snapshot.model_dump_json()
     assert TOKEN not in snapshot.model_dump_json()
-    assert [request.url.path for request in requests] == [
-        f"/repos/example/project/commits/{SHA}", "/repos/example/project/issues/7"
-    ]
+    assert snapshot.repository_context.commit == SHA
+    assert snapshot.repository_context.files[0].content == '# Project\n'
     for request in requests:
         assert request.method == "GET"
         assert request.url.scheme == "https"
         assert request.url.host == "api.github.com"
         assert request.url.port is None
-        assert not request.url.query
+        if '/git/trees/' in request.url.path:
+            assert dict(request.url.params) == {'recursive': '1'}
+        else:
+            assert not request.url.query
         assert not request.content
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
-        assert request.headers["Accept"] == "application/vnd.github+json"
+        expected_accept = ('application/vnd.github.raw+json' if '/git/blobs/' in request.url.path
+                           else 'application/vnd.github+json')
+        assert request.headers['Accept'] == expected_accept
         assert request.headers["X-GitHub-Api-Version"] == "2026-03-10"
         assert request.headers["User-Agent"] == "RepoPilot"
         assert TOKEN not in str(request.url)
@@ -142,6 +157,7 @@ async def test_invalid_commit_stops_before_issue(payload: CreateTask, row: objec
 )
 async def test_invalid_issue_fields_fail_without_snapshot(payload: CreateTask, changes: dict) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
+        assert '/git/' not in request.url.path, 'Invalid Issue must stop before context fetch'
         row = {"sha": SHA} if "/commits/" in request.url.path else issue_row(**changes)
         return httpx.Response(200, json=row)
 

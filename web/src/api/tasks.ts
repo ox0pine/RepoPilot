@@ -18,6 +18,22 @@ export interface GoalContent {
   open_questions: string[]
 }
 
+export interface ContextFile {
+  path: string
+  blob_sha: string
+  content: string
+  truncated: boolean
+  reason: string
+}
+
+export interface RepositoryContext {
+  commit: string
+  tree: string[]
+  files: ContextFile[]
+  omissions: string[]
+  tree_truncated: boolean
+}
+
 export interface TaskGoal {
   version: number
   content: GoalContent
@@ -51,6 +67,7 @@ export interface TaskDetail extends TaskSummary {
     issue_body: string
     issue_updated_at: string
     fetched_at: string
+    repository_context: RepositoryContext
   }
   goals: TaskGoal[]
   messages: TaskMessage[]

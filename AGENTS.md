@@ -2,22 +2,25 @@
 
 ## Project Overview
 
-RepoPilot is a goal-driven coding workbench being rebuilt from scratch for Python, React, and Vue repositories. Currently implemented: shared access-key login, model/GitHub settings, conversation lists/statistics, verified GitHub Issue snapshots, model-generated Goals, feedback revisions, and human approval. **Approval confirms a Goal only**; code execution, source-code search, SSE, artifact review, and PR delivery are not implemented. Treat roadmap designs and historical verification records as distinct from current behavior.
+RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositories. Implemented: shared access-key login, model/GitHub settings, conversation lists/statistics, verified GitHub Issue and bounded source-context snapshots, model-generated Goals, feedback revisions, human approval, explicit Docker Runs, polling, cancellation, check/log/Report/Patch review and downloads. **Approval confirms a Goal only**; execution is a separate action. SSE, PR delivery, in-run feedback and inheritance of previous Run changes are not implemented. Current simplified scope is D-021; older roadmap designs and verification records are historical.
 
 ## Architecture & Data Flow
 
 - Backend: async FastAPI → application services → domain contracts, PostgreSQL repositories, and external integration clients. `src/repopilot/api/app.py:create_app` is the composition root; it constructs dependencies, injects services into router builders, and manages database/Redis lifespan. Extend this explicit wiring rather than adding a parallel dependency container.
-- Creation: validate GitHub HTTPS repository URL, full 40-character commit SHA, and same-repository Issue → read fixed GitHub API → persist verified source snapshot and initial message. Generation/revision reuses that snapshot; it does not inspect repository code.
+- Creation: validate GitHub HTTPS repository URL, full 40-character commit SHA, and same-repository Issue → read fixed GitHub API and bounded tree/blob context with Git hash verification → persist immutable source snapshot and initial message. Repository context is required; no historical Issue-only snapshot compatibility. Generation/revision reuses the saved snapshot.
 - Generation: commit a generation attempt → call non-streaming Chat Completions outside the transaction → conditionally append an immutable Goal version and message. States: `draft → generating → awaiting_approval → approved`, with `generation_failed` and explicit manual retry.
-- PostgreSQL is authoritative for settings, tasks, Goal versions, and messages. Redis only caches model lists for 300 seconds, keyed by endpoint/credential hash. Startup fails if either service is unavailable; no JSON fallback.
+- PostgreSQL is authoritative for settings, tasks, Goal versions, messages, Runs and bounded Run events. Redis retains the original 300-second model-list cache, isolated by normalized endpoint and API key; a cache hit avoids a provider request. Expired/invalid/unavailable cache falls through to the provider, never to stale data on provider failure. API startup requires PostgreSQL and Redis. No JSON fallback or old database/schema migration support.
+- Correction (D-022): removing Redis was an unauthorized mistake, now reversed. The authorized PostgreSQL reset and current-format-only source/key/Goal contracts remain in force; do not restore old business data. Historical verification stays historical; report Redis restoration checks only after actually running them.
+- Execution: Run creation only queues under the Task lock and increments revision. A single `python -m repopilot.worker` owns session advisory lock 721804630, claims FIFO, and runs the sole model/tool loop outside transactions. Containers have readonly roots, limited tmpfs/resources, no host mounts/socket/credentials, and no network after optional trusted setup. Token-fenced writes prevent late workers; cleanup must succeed before cancelled/interrupted. Startup retires orphan Runs rather than replaying unknown effects. Every Run starts from its fixed commit.
 - Frontend: Vue composition API with typed API wrappers, a lightweight custom router, and module-level reactive stores—not Pinia or Vue Router. Requests flow through `web/src/api/client.ts`; `App.vue` coordinates authentication and page selection. Workbench credentials/data are shared, not per-user isolated.
 
 ## Key Directories
 
 - `src/repopilot/{api,application,domain,persistence,integration}/`: HTTP boundaries, use-case orchestration, validated contracts, transactional storage, and external I/O respectively. Keep network work out of persistence transactions.
+- `src/repopilot/execution/` and `worker.py`: bounded model protocol, validated tools, Docker workspace/artifact capture, sequential lifecycle. Shell executes only inside the container; host Git handles trusted file data for Patch generation, not source execution.
 - `web/src/{views,components,api,router,stores,styles}/`: pages, reusable UI, HTTP contracts, navigation, shared state, and theme ownership.
 - `tests/`: backend domain/client, database-concurrency, and ASGI route tests.
-- `deploy/`: API/frontend Dockerfiles and Nginx configuration; `development-plan/`: product boundaries, roadmap, and decisions.
+- `deploy/`: API/frontend/worker/runtime Dockerfiles and Nginx configuration; only the optional `execution` profile worker mounts the Docker socket. `development-plan/`: product boundaries, historical roadmap, and current D-021 decision.
 - `reference/` is ignored comparison material, not application code or an import source. `.repopilot/` and `tmp/` are local runtime/acceptance material, not maintained source. No root scripts directory or Makefile is provided.
 
 ## Development Commands
@@ -33,6 +36,11 @@ python -m pip install --no-deps --editable .
 # Local backend with Docker-hosted dependencies.
 docker compose up -d --wait postgres redis
 python -m repopilot
+
+# Optional execution, only after preparing Docker and saved credentials.
+docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .
+python -m repopilot.worker
+# Containerized worker is opt-in: docker compose --profile execution up -d --build worker
 
 # Frontend development / production type-check and build.
 npm --prefix web ci
@@ -60,6 +68,7 @@ Full-stack UI: `http://127.0.0.1:8081/`; API defaults to port 8000. Vite proxies
 - Frontend tokens stay in memory. Guard asynchronous results using session versions, request sequences, and `AbortController`; token equality alone cannot distinguish logout/re-login. Only a current-session 401 may clear authentication. Deduplicate paginated tasks by ID because updated records can move forward.
 - Use Naive UI and official `@lucide/vue`, not a second component library. `styles/theme.ts` owns the shared palette/theme overrides; `main.ts` installs CSS variables before mount, including for Teleport dialogs. Preserve responsive layouts, focus return/trapping, and busy-state close guards.
 - GitHub token saving is local encrypted persistence; optional SSH authorization is a separate explicit network-write action. Never introduce automatic registration into source/Goal flows. Preserve model-key semantics: omitted key retains it for the same endpoint; changing endpoints must not reuse the old key.
+- Keep current-only storage/protocol contracts: generated Ed25519/OpenSSH keypairs only, no RSA/ECDSA/PEM or incomplete-pair repair; Goal responses must be JSON, not Markdown fences. Empty settings are valid fresh-install state. A database reset requires explicit user authorization and clears all saved settings/history; never restore old data implicitly.
 
 ## Important Files
 
@@ -74,12 +83,12 @@ Full-stack UI: `http://127.0.0.1:8081/`; API defaults to port 8000. Vite proxies
 
 - Python `>=3.12`; host development uses the `repopilot` Conda environment (pinned Python 3.12.14), **not `.venv`**. Keep development requirements input/output aligned. `uv.lock` exists, but host setup uses Conda/pip and the API image installs with pip; do not assume `uv sync` is the standard workflow.
 - Frontend uses npm with committed package lock, not Bun. Node requirement: `^20.19.0 || >=22.12.0`; Docker builds with Node 22. TypeScript is strict. No frontend lint/test script is currently defined.
-- PostgreSQL 16 and Redis 7 run as separate services; client packages do not supply servers. Docker host ports bind loopback. Container access to host model services uses `host.docker.internal`, not container-local `127.0.0.1`.
+- PostgreSQL 16 and Redis 7 run as separate services; their client packages do not supply servers. Redis is only the model-list cache, not an execution queue. Docker host ports bind loopback. Container access to host model services uses `host.docker.internal`, not container-local `127.0.0.1`.
 - Never overwrite `.env` or user credentials for verification. GitHub token/private key encryption requires the stable `GITHUB_CREDENTIALS_KEY`; replacing it cannot recover existing ciphertext. Model API keys currently remain plaintext in PostgreSQL, although responses omit them: protect database backups and never log secrets.
 
 ## Testing & QA
 
-- Pytest + pytest-asyncio (`asyncio_mode = "auto"`); discovery defaults to `tests/`. Set `TEST_DATABASE_URL` (`postgresql+asyncpg://…`) and `TEST_REDIS_URL` (`redis://…`) to **dedicated test instances**, never the workbench database. Database fixtures create/drop UUID schemas; route fixtures enter the real app lifespan. Missing-service skips are not passing integration verification.
+- Pytest + pytest-asyncio (`asyncio_mode = "auto"`); discovery defaults to `tests/`. Set `TEST_DATABASE_URL` (`postgresql+asyncpg://…`) and `TEST_REDIS_URL` (`redis://…`) to **dedicated test instances**, never workbench services. Database fixtures create/drop UUID schemas; route fixtures enter the real app lifespan with the dedicated Redis URL. Cache tests isolate endpoints/keys and delete only their own entries. Missing-service skips are not passing integration verification.
 - Inject `httpx.MockTransport` for GitHub/model HTTP and use `ASGITransport` for API tests. Use real isolated PostgreSQL for persistence, locking, and rollback behavior. Keep production clients on real network paths; do not add fixed Goals or mock-source fallbacks.
 - Prioritize revisions/approval invalidation, stale-result rejection, cancellation, lease recovery, pagination, secret redaction, credential replacement, upstream failures, and size/deadline boundaries. No numerical coverage threshold is configured; installed coverage tooling is not a coverage policy.
 - Frontend build runs `vue-tsc --noEmit` plus Vite. UI changes also need browser checks at desktop/mobile sizes: auth races, deep links, drafts/errors, modal keyboard/focus behavior, and overflow. Controlled fixtures prove interaction only, not real GitHub/model/execution success. Report the checks actually run rather than quoting historical test counts.

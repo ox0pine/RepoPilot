@@ -90,14 +90,20 @@ class GitHubSourceClient:
                         )
                     _check_status(response, "Issue")
                     issue = _json(response)
-                    return self._snapshot(payload, issue_number, issue)
+                    source_issue = self._source_issue(payload, issue_number, issue)
+                    from repopilot.integration.context import RepositoryContextClient
+
+                    context = await RepositoryContextClient(transport=self.transport).fetch(
+                        payload, api_token, f'{source_issue["issue_title"]}\n{source_issue["issue_body"]}',
+                    )
+                    return SourceSnapshot(**source_issue, repository_context=context)
         except (TimeoutError, httpx.TimeoutException):
             raise TaskError(504, "读取 GitHub 来源超时，请稍后重试") from None
         except httpx.RequestError:
             raise TaskError(502, "无法连接 GitHub 来源服务，请稍后重试") from None
 
     @staticmethod
-    def _snapshot(payload: CreateTask, issue_number: int, issue: dict) -> SourceSnapshot:
+    def _source_issue(payload: CreateTask, issue_number: int, issue: dict) -> dict:
         if "pull_request" in issue:
             raise TaskError(422, "目前仅支持 GitHub Issue，不支持 Pull Request")
         number = issue.get("number")
@@ -130,13 +136,13 @@ class GitHubSourceClient:
             raise _invalid() from None
         if body_size > ISSUE_BODY_LIMIT:
             raise TaskError(422, "Issue 正文超过 64 KiB，请缩短内容后重新创建对话")
-        return SourceSnapshot(
-            repository_url=payload.repository_url,
-            baseline_commit=payload.baseline_commit,
-            issue_number=issue_number,
-            issue_title=title,
-            issue_body=body,
-            issue_url=normalized_url,
-            issue_updated_at=timestamp,
-            fetched_at=datetime.now(timezone.utc),
-        )
+        return {
+            'repository_url': payload.repository_url,
+            'baseline_commit': payload.baseline_commit,
+            'issue_number': issue_number,
+            'issue_title': title,
+            'issue_body': body,
+            'issue_url': normalized_url,
+            'issue_updated_at': timestamp,
+            'fetched_at': datetime.now(timezone.utc),
+        }

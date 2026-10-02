@@ -101,8 +101,7 @@ def repository(database, encryption_key):
 async def route_app(database, encryption_key, monkeypatch):
     redis_url = os.environ.get("TEST_REDIS_URL")
     if not redis_url:
-        pytest.skip("TEST_REDIS_URL must point to a dedicated Redis test instance")
-
+        pytest.skip("TEST_REDIS_URL must point to a dedicated test Redis")
     keys = []
 
     def register_key(request):
@@ -155,31 +154,18 @@ async def stored_row(database):
 
 
 
-@pytest.mark.parametrize("algorithm", ["ed25519", "rsa", "ecdsa"])
-@pytest.mark.parametrize("private_format", [
-    serialization.PrivateFormat.OpenSSH, serialization.PrivateFormat.PKCS8,
-])
-def test_supported_pairs_normalize_comments_and_crlf(algorithm, private_format):
-    factories = {
-        "ed25519": ed25519.Ed25519PrivateKey.generate,
-        "rsa": lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048),
-        "ecdsa": lambda: ec.generate_private_key(ec.SECP256R1()),
-    }
-    public, private = serialize_pair(factories[algorithm](), private_format)
+def test_current_pair_normalizes_comments_and_crlf(key_pair):
+    public, private = key_pair
     assert normalize_ssh_public_key(f"  {public} test@example.invalid  ") == public
-    assert validate_ssh_pair(public + " another-comment", "\n" + private.replace("\n", "\r\n")) == (
-        public, private,
-    )
-    assert validate_ssh_pair(public, "  \r\n ") == (public, "")
-    assert normalize_ssh_public_key(" \n\t ") == ""
+    assert validate_ssh_pair(public + " another-comment", "\n" + private.replace("\n", "\r\n")) == (public, private)
+    assert validate_ssh_pair('', '') == ('', '')
+    with pytest.raises(InvalidGitHubSettingsError, match='private key is required'):
+        validate_ssh_pair(public, '')
 
 
-@pytest.mark.parametrize("private_format", [
-    serialization.PrivateFormat.OpenSSH, serialization.PrivateFormat.PKCS8,
-])
-def test_encrypted_private_keys_are_rejected(private_format):
+def test_encrypted_private_keys_are_rejected():
     public, private = serialize_pair(
-        ed25519.Ed25519PrivateKey.generate(), private_format,
+        ed25519.Ed25519PrivateKey.generate(), serialization.PrivateFormat.OpenSSH,
         serialization.BestAvailableEncryption(b"test-passphrase"),
     )
     with pytest.raises(InvalidGitHubSettingsError) as error:
@@ -188,12 +174,15 @@ def test_encrypted_private_keys_are_rejected(private_format):
     assert private not in str(error.value)
 
 
-def test_traditional_rsa_pem_is_accepted():
-    public, private = serialize_pair(
-        rsa.generate_private_key(public_exponent=65537, key_size=2048),
-        serialization.PrivateFormat.TraditionalOpenSSL,
-    )
-    assert validate_ssh_pair(public, private) == (public, private)
+@pytest.mark.parametrize('key_factory,private_format', [
+    (lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048), serialization.PrivateFormat.OpenSSH),
+    (lambda: ec.generate_private_key(ec.SECP256R1()), serialization.PrivateFormat.OpenSSH),
+    (ed25519.Ed25519PrivateKey.generate, serialization.PrivateFormat.PKCS8),
+])
+def test_noncurrent_pairs_are_rejected(key_factory, private_format):
+    public, private = serialize_pair(key_factory(), private_format)
+    with pytest.raises(InvalidGitHubSettingsError):
+        validate_ssh_pair(public, private)
 
 
 def test_invalid_or_unsupported_keys_and_mismatched_pairs(key_pair):
@@ -270,7 +259,7 @@ async def test_generated_pair_encrypted_and_reused_after_restart(database, repos
 
 
 @pytest.mark.parametrize('algorithm', ['rsa', 'ecdsa'])
-async def test_legacy_pairs_reused_without_secret_rewrite(database, repository, encryption_key, algorithm):
+async def test_noncurrent_saved_pairs_are_rejected_without_rewrite(database, repository, encryption_key, algorithm):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048) if algorithm == 'rsa' else ec.generate_private_key(ec.SECP256R1())
     public, private = serialize_pair(key, serialization.PrivateFormat.PKCS8)
     cipher = Fernet(encryption_key)
@@ -279,23 +268,32 @@ async def test_legacy_pairs_reused_without_secret_rewrite(database, repository, 
         row.public_key = public
         row.private_key_ciphertext = cipher.encrypt(private.encode()).decode()
     before = await stored_row(database)
-    saved = await repository.save(GitHubSettingsUpdate(api_token=MARKER_TOKEN))
-    assert saved.public_key == public and saved.private_key.get_secret_value() == private
-    assert (await stored_row(database))[:2] == before[:2]
+    with pytest.raises(InvalidGitHubSettingsError):
+        await repository.load()
+    with pytest.raises(InvalidGitHubSettingsError):
+        await repository.save(GitHubSettingsUpdate(api_token=MARKER_TOKEN))
+    assert await stored_row(database) == before
 
 
-async def test_public_only_legacy_config_generates_complete_pair(database, repository, key_pair):
+@pytest.mark.parametrize('missing', ['public', 'private'])
+async def test_incomplete_saved_pair_is_rejected_without_repair(database, repository, encryption_key, key_pair, missing):
+    public, private = key_pair
+    async with database.session() as session, session.begin():
+        row = await session.get(GitHubSettingsRow, 1)
+        row.public_key = '' if missing == 'public' else public
+        row.private_key_ciphertext = '' if missing == 'private' else Fernet(encryption_key).encrypt(private.encode()).decode()
+    before = await stored_row(database)
+    with pytest.raises(InvalidGitHubSettingsError):
+        await repository.load()
+    with pytest.raises(InvalidGitHubSettingsError):
+        await repository.save(GitHubSettingsUpdate(api_token=MARKER_TOKEN))
+    assert await stored_row(database) == before
+
+
+async def test_corrupt_saved_pair_never_rotates_or_overwrites(database, repository, encryption_key, key_pair):
     async with database.session() as session, session.begin():
         row = await session.get(GitHubSettingsRow, 1)
         row.public_key = key_pair[0]
-    saved = await repository.save(GitHubSettingsUpdate(api_token=MARKER_TOKEN))
-    assert saved.public_key != key_pair[0]
-    assert validate_ssh_pair(saved.public_key, saved.private_key.get_secret_value())[0] == saved.public_key
-
-
-async def test_malformed_legacy_pair_never_rotates_or_overwrites(database, repository, encryption_key):
-    async with database.session() as session, session.begin():
-        row = await session.get(GitHubSettingsRow, 1)
         row.private_key_ciphertext = Fernet(encryption_key).encrypt(b'malformed-private-marker').decode()
     before = await stored_row(database)
     with pytest.raises(InvalidGitHubSettingsError):
@@ -473,7 +471,6 @@ async def test_authorize_requires_saved_credentials_without_writes_or_network(ro
     async with route_app(github_transport=httpx.MockTransport(unexpected_github_request)) as client:
         response = await client.post('/api/settings/github/authorize')
         assert response.status_code == 422
-        assert 'Save' in response.json()['detail']
         assert MARKER_TOKEN not in response.text
         assert requests == []
     assert await stored_row(database) == before
@@ -484,7 +481,7 @@ async def test_authorize_requires_saved_credentials_without_writes_or_network(ro
     {'private_key': 'private-secret-marker', 'api_token': MARKER_TOKEN},
     {'api_token': 'invalid token marker'}, {'api_token': 'secret-length-marker' * 300},
 ])
-async def test_route_rejects_legacy_fields_and_redacts_secrets(route_client, database, payload):
+async def test_route_rejects_manual_keys_and_redacts_secrets(route_client, database, payload):
     response = await route_client.put('/api/settings/github', json=payload)
     assert response.status_code == 422
     for secret in [MARKER_TOKEN, 'private-secret-marker', 'invalid token marker', 'secret-length-marker']:

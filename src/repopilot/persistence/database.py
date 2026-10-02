@@ -105,6 +105,9 @@ class Database:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def initialize(self) -> None:
+        # Register execution tables for direct database and worker initialization.
+        from repopilot.persistence.runs import RunEventRow, RunRow  # noqa: F401
+
         defaults = ModelSettings()
         async with self.engine.begin() as connection:
             # Serialize schema bootstrap across API workers sharing the database.

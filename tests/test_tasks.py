@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -10,6 +11,7 @@ import pytest_asyncio
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from repopilot.domain.context import RepositoryContext
 from repopilot.domain.tasks import GoalContent, SourceSnapshot, TaskError
 from repopilot.persistence.database import Database, TaskRow
 from repopilot.persistence.tasks import TaskRepository
@@ -41,7 +43,9 @@ def source(number=1):
     return SourceSnapshot(repository_url='https://github.com/example/repo', baseline_commit='a' * 40,
                           issue_number=number, issue_title=f'Issue {number}', issue_body='Fixed snapshot',
                           issue_url=f'https://github.com/example/repo/issues/{number}',
-                          issue_updated_at=datetime.now(timezone.utc), fetched_at=datetime.now(timezone.utc))
+                          issue_updated_at=datetime.now(timezone.utc), fetched_at=datetime.now(timezone.utc),
+                          repository_context=RepositoryContext(commit='a' * 40, tree=[], files=[],
+                                                               omissions=['Fixture contains no source files'], tree_truncated=False))
 
 
 def goal(summary='解决问题'):
@@ -164,7 +168,7 @@ async def api_client(database, monkeypatch):
     from repopilot.persistence.database import ModelSettingsRow, GitHubSettingsRow
     redis_url = os.environ.get('TEST_REDIS_URL')
     if not redis_url:
-        pytest.skip('TEST_REDIS_URL must point to dedicated Redis')
+        pytest.skip('TEST_REDIS_URL must point to a dedicated test Redis')
     key = Fernet.generate_key()
     async with database.session() as session, session.begin():
         model = await session.get(ModelSettingsRow, 1)
@@ -173,13 +177,28 @@ async def api_client(database, monkeypatch):
         github = await session.get(GitHubSettingsRow, 1)
         github.api_token_ciphertext = Fernet(key).encrypt(b'github-secret-marker').decode()
     calls = []
-    controls = {'source_status': 200, 'model_status': 200, 'body': 'Snapshot body'}
+    controls = {'source_status': 200, 'model_status': 200, 'body': 'Snapshot body',
+                'context_status': 200, 'bad_blob': False, 'invalid_tree': False}
     def source_transport(request):
         calls.append(str(request.url))
         if controls['source_status'] != 200:
             return httpx.Response(controls['source_status'], text='github-secret-marker')
         if '/commits/' in request.url.path:
             return httpx.Response(200, json={'sha':'a' * 40})
+        content = b'# Fixture repository\n'
+        blob_sha = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+        if '/git/' in request.url.path and controls['context_status'] != 200:
+            return httpx.Response(controls['context_status'], text='github-secret-marker')
+        if '/git/trees/' in request.url.path:
+            if controls['invalid_tree']:
+                return httpx.Response(200, json={'tree': 'invalid'})
+            return httpx.Response(200, json={
+                'sha': 'b' * 40, 'truncated': False,
+                'tree': [{'path': 'README.md', 'type': 'blob', 'mode': '100644',
+                          'sha': blob_sha, 'size': len(content)}],
+            })
+        if '/git/blobs/' in request.url.path:
+            return httpx.Response(200, content=b'wrong hash' if controls['bad_blob'] else content)
         return httpx.Response(200, json={'number':1, 'title':'Example issue', 'body':controls['body'], 'html_url':'https://github.com/example/repo/issues/1', 'updated_at':'2026-01-01T00:00:00Z'})
     def model_transport(request):
         import json
@@ -208,10 +227,15 @@ async def test_authenticated_api_goal_lifecycle(api_client):
     assert response.status_code == 201
     task = response.json()
     path = '/api/tasks/' + task['id']
+    snapshot = task['source_snapshot']
+    assert snapshot['repository_context']['files'][0]['content'] == '# Fixture repository\n'
+    source_calls = [url for url in calls if 'api.github.com' in url]
     task = (await client.post(path + '/goal', json={'expected_revision':1,'action':'generate'})).json()
     assert task['goals'][0]['content']['summary'] == '模型实际输出'
     task = (await client.post(path + '/goal', json={'expected_revision':task['revision'],'action':'revise','feedback':'不要升级依赖'})).json()
     assert task['goals'][1]['content']['non_goals'] == ['依赖升级']
+    assert task['source_snapshot'] == snapshot
+    assert [url for url in calls if 'api.github.com' in url] == source_calls
     assert (await client.post(path + '/approve', json={'expected_revision':task['revision'],'goal_version':1})).status_code == 409
     count = len(calls)
     response = await client.post(path + '/approve', json={'expected_revision':task['revision'],'goal_version':2})
@@ -288,3 +312,19 @@ async def test_cancelled_service_attempt_is_persisted_as_failed(database):
     restored = await repo.detail(task.id)
     assert restored.status == 'generation_failed' and restored.goals == []
     assert restored.generation_deadline is None
+
+
+@pytest.mark.parametrize('control,expected', [
+    ('context_status', 422), ('bad_blob', 502), ('invalid_tree', 502),
+])
+async def test_context_failure_does_not_persist_partial_task(api_client, control, expected):
+    client, calls, controls = api_client
+    controls[control] = 403 if control == 'context_status' else True
+    payload = {'repository_url': 'https://github.com/example/repo',
+               'baseline_commit': 'a' * 40,
+               'issue_url': 'https://github.com/example/repo/issues/1'}
+    response = await client.post('/api/tasks', json=payload)
+    assert response.status_code == expected
+    assert 'github-secret-marker' not in response.text
+    assert (await client.get('/api/tasks/stats')).json()['total'] == 0
+    assert (await client.get('/api/tasks')).json()['items'] == []

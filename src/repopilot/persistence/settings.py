@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from repopilot.domain.settings import (
-    GitHubSettingsUpdate, InvalidGitHubSettingsError, ModelSettings, ensure_ssh_pair,
+    GitHubSettingsUpdate, InvalidGitHubSettingsError, ModelSettings, ensure_ssh_pair, validate_ssh_pair,
     normalize_github_api_token,
 )
 from repopilot.persistence.database import Database, GitHubSettingsRow, ModelSettingsRow
@@ -95,6 +95,7 @@ class GitHubSettingsRepository:
             token = cipher.decrypt(row.api_token_ciphertext.encode()).decode() if row.api_token_ciphertext else ''
         except (InvalidToken, ValueError, TypeError):
             raise SettingsStorageError('Unable to decrypt saved GitHub credentials; check GITHUB_CREDENTIALS_KEY') from None
+        validate_ssh_pair(row.public_key, private)
         return StoredGitHubSettings(public_key=row.public_key, private_key=SecretStr(private), api_token=SecretStr(token))
 
     async def load(self) -> StoredGitHubSettings:

@@ -20,6 +20,8 @@ from pydantic import (
     model_validator,
 )
 
+from repopilot.domain.context import RepositoryContext
+
 
 TaskStatus = Literal['draft', 'generating', 'awaiting_approval', 'approved', 'generation_failed']
 MessageKind = Literal['source', 'feedback', 'goal', 'approval']
@@ -208,6 +210,7 @@ class SourceSnapshot(TaskModel):
     issue_url: StrictStr
     issue_updated_at: UTCDateTime
     fetched_at: UTCDateTime
+    repository_context: RepositoryContext
 
 
 class TaskGoal(TaskModel):

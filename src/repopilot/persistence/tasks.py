@@ -25,6 +25,7 @@ from repopilot.domain.tasks import (
     encode_cursor,
 )
 from repopilot.persistence.database import Database, TaskGoalRow, TaskMessageRow, TaskRow
+from repopilot.persistence.runs import RunRow
 
 
 INTERRUPTED_ERROR = "目标生成已中断，请重试"
@@ -205,6 +206,11 @@ class TaskRepository:
         async with self._transaction() as session:
             row, now = await self._locked(session, task_id)
             self._expect_revision(row, expected_revision)
+            active_run = await session.scalar(select(RunRow.id).where(
+                RunRow.task_id == task_id, RunRow.status.in_(["queued", "running"]),
+            ))
+            if active_run is not None:
+                raise TaskError(409, "执行尚未结束，请先取消或等待完成后再修改目标")
             if action == "generate":
                 if row.status != "draft":
                     raise TaskError(409, "当前对话不能首次生成目标")
@@ -296,7 +302,7 @@ class TaskRepository:
             row.approved_at = now
             row.revision += 1
             row.updated_at = now
-            session.add(TaskMessageRow(task_id=row.id, kind="approval", text="目标已批准，代码执行尚未接入",
+            session.add(TaskMessageRow(task_id=row.id, kind="approval", text="目标已批准；开始执行需要单独确认",
                                        goal_version=goal_version, created_at=now))
             await session.flush()
             return await self._detail(session, row)

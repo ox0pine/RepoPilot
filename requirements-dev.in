@@ -13,7 +13,7 @@ pydantic>=2.12.2,<3
 pydantic-settings>=2,<3
 httpx
 pyyaml
-# PostgreSQL and Redis clients only; servers remain in Docker Desktop.
+# PostgreSQL clients only; the server remains in Docker Desktop.
 sqlalchemy[asyncio]>=2,<3
 alembic>=1,<2
 cryptography==50.0.1
