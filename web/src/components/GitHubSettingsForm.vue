@@ -176,7 +176,7 @@ onBeforeUnmount(() => {
   <section class="github-settings" aria-labelledby="github-settings-title">
     <header class="section-heading">
       <h2 id="github-settings-title"><GitBranch :size="22" aria-hidden="true" /> GitHub</h2>
-      <p>配置仓库来源访问权限，用于读取 commit 和 Issue、生成目标。</p>
+      <p>配置仓库来源访问与修复分支提交权限，用于读取 commit 和 Issue，并在用户显式操作后向自己的仓库推送唯一分支。</p>
     </header>
 
     <div v-if="loading" class="loading-state" role="status"><NSpin size="small" /> 正在读取 GitHub 配置…</div>
@@ -191,7 +191,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="saved.api_token_configured && !tokenEditing" class="credential-summary">
-          <div><strong>GitHub API token</strong><p class="help">已加密保存；仓库权限将在创建对话时校验。</p></div>
+          <div><strong>GitHub API token</strong><p class="help">已加密保存；仓库读取权限将在创建对话时校验，分支写权限仅在显式提交修复分支时校验。</p></div>
           <NButton ref="replaceButton" :disabled="busy || loading" @click="editToken">更换 token</NButton>
         </div>
         <NForm v-else label-placement="top" @submit.prevent="save">
@@ -210,10 +210,10 @@ onBeforeUnmount(() => {
 
         <div class="permission-guide">
           <h4>创建 token 时，选择需要访问的仓库</h4>
-          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，在 Repository permissions 中开启以下只读权限：</p>
-          <div class="permission-list"><span>Contents <strong>Read-only</strong></span><span>Issues <strong>Read-only</strong></span></div>
-          <p class="help">组织仓库可能需要管理员批准。</p>
-          <details class="classic-guide"><summary>使用 Classic token？</summary><p class="help"><a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">Classic token</a> 读取私有仓库通常需要 <strong>repo</strong> scope，同时包含广泛的写权限。建议优先使用上述最小权限方案。</p></details>
+          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，在 Repository permissions 中为来源读取开启以下权限；若要提交修复分支，将 Contents 提升为 Read and write：</p>
+          <div class="permission-list"><span>Contents <strong>Read-only / 分支交付需 Read and write</strong></span><span>Issues <strong>Read-only</strong></span></div>
+          <p class="help">分支交付仅允许 token 所属用户自己的仓库，不自动创建 PR 或合并。组织仓库可能需要管理员批准。</p>
+          <details class="classic-guide"><summary>使用 Classic token？</summary><p class="help"><a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">Classic token</a> 读取或写入私有仓库通常需要 <strong>repo</strong> scope，包含广泛权限。建议优先使用上述限定仓库的 Fine-grained token。</p></details>
         </div>
         <p class="help privacy-note">工作台共享配置。关闭设置或切换分类会丢弃未保存的草稿。</p>
       </section>

@@ -324,7 +324,7 @@ def transfer(mode: str) -> None:
                 if index >= 20000 or member.name in seen:
                     raise ValueError('Invalid source archive member set')
                 seen.add(member.name)
-                if not (member.isdir() or member.isreg()) or '.git' in member.name.split('/'):
+                if not (member.isdir() or member.isreg()):
                     raise ValueError('Unsafe source archive member')
                 total += member.size
                 if total > 200 * 1024 * 1024:
@@ -360,8 +360,14 @@ def transfer(mode: str) -> None:
         for directory, dirs, files in os.walk(ROOT, followlinks=False):
             relative = Path(directory).relative_to(ROOT)
             inside_ignored = any(part in ignores for part in relative.parts)
-            dirs[:] = sorted(d for d in dirs if (not inside_ignored and d not in ignores) or (relative / d).as_posix() in ancestors)
+            dirs[:] = sorted(
+                d for d in dirs
+                if d != '.git' and ((not inside_ignored and d not in ignores)
+                                    or (relative / d).as_posix() in ancestors)
+            )
             for filename in sorted(dirs + files):
+                if filename == '.git':
+                    continue
                 candidate = Path(directory) / filename
                 if filename not in dirs and inside_ignored and candidate.relative_to(ROOT).as_posix() not in tracked:
                     continue

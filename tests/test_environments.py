@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import shutil
-import tarfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from unittest.mock import patch
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from repopilot.domain.context import RepositoryContext
 from repopilot.domain.tasks import SourceSnapshot
+from repopilot.execution.git import GitHubGitCredentials
 from repopilot.execution.workspace import Workspace
 
 DOCKER_ENABLED = os.environ.get('REPOPILOT_DOCKER_TESTS') == '1'
@@ -22,23 +21,6 @@ real_docker = pytest.mark.skipif(
 )
 COMMIT = 'a' * 40
 TOKEN = 'semantic-fixture-secret-never-enters-run'
-SOURCE_URL = f'https://api.github.com/repos/example/semantic-fixture/tarball/{COMMIT}'
-
-
-def fixture_archive(files: dict[str, str]) -> bytes:
-    """Checked-in tiny source fixtures, transported as a genuine GitHub tarball."""
-    output = io.BytesIO()
-    with tarfile.open(fileobj=output, mode='w:gz') as archive:
-        root = tarfile.TarInfo('semantic-fixture-' + COMMIT)
-        root.type = tarfile.DIRTYPE
-        archive.addfile(root)
-        for path, text in sorted(files.items()):
-            data = text.encode('utf-8')
-            entry = tarfile.TarInfo(root.name + '/' + path)
-            entry.size = len(data)
-            entry.mode = 0o644
-            archive.addfile(entry, io.BytesIO(data))
-    return output.getvalue()
 
 
 def fixture_source() -> SourceSnapshot:
@@ -57,19 +39,24 @@ async def prepared_workspace(files: dict[str, str]):
     if not DOCKER_ENABLED:
         pytest.skip('Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage')
     assert shutil.which('docker'), 'Docker coverage enabled but Docker CLI is unavailable'
-    data = fixture_archive(files)
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == SOURCE_URL
-        assert request.headers['Authorization'] == f'Bearer {TOKEN}'
-        return httpx.Response(200, content=data)
+    async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
+        destination.mkdir()
+        (destination / '.git').mkdir()
+        for name, content in files.items():
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
 
-    workspace = Workspace(uuid4(), source_transport=httpx.MockTransport(respond))
+    workspace = Workspace(uuid4())
     try:
-        await workspace.prepare(
-            source=fixture_source(), github_token=TOKEN,
-            image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'),
-        )
+        with patch('repopilot.execution.workspace.clone_fixed_commit', clone_fixture):
+            await workspace.prepare(
+                source=fixture_source(),
+                github_credentials=GitHubGitCredentials(api_token=TOKEN, private_key=''),
+                git_auth_strategy='https_token',
+                image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'),
+            )
         result = await workspace.setup()
         assert result.exit_code == 0, result.output
         yield workspace

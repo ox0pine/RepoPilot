@@ -56,8 +56,16 @@ services:
       retries: 20
     restart: unless-stopped
 
+  runtime:
+    image: ${EXECUTION_IMAGE:-repopilot-dev:local}
+    build:
+      context: .
+      dockerfile: deploy/runtime.Dockerfile
+    command: ["python3", "--version"]
+    network_mode: none
+    restart: "no"
+
   worker:
-    profiles: [execution]
     build:
       context: .
       dockerfile: deploy/worker.Dockerfile
@@ -73,6 +81,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_healthy
+      runtime:
+        condition: service_completed_successfully
     deploy:
       replicas: 1
     stop_grace_period: 60s

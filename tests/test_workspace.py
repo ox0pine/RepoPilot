@@ -5,31 +5,30 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
 import pytest
 import pytest_asyncio
 
 from repopilot.domain.context import RepositoryContext
 from repopilot.domain.tasks import SourceSnapshot
 from repopilot.execution import workspace as workspace_module
-from repopilot.execution.workspace import (
-    Workspace,
-    WorkspaceError,
-    download_source,
-    extract_archive,
-    generate_patch,
+from repopilot.execution.git import (
+    GitAuthContext,
+    GitHubGitCredentials,
+    clone_fixed_commit,
 )
+from repopilot.execution.workspace import Workspace, WorkspaceError, extract_archive, generate_patch
 
 COMMIT = 'a' * 40
 TOKEN = 'workspace-fixture-secret-not-for-container'
+PRIVATE_KEY = 'workspace-fixture-private-key-not-for-container'
 ROOT = 'example-project-' + COMMIT
-SOURCE_URL = f'https://api.github.com/repos/example/project/tarball/{COMMIT}'
-CODELOAD_URL = f'https://codeload.github.com/example/project/legacy.tar.gz/{COMMIT}'
 DOCKER_ENABLED = os.environ.get('REPOPILOT_DOCKER_TESTS') == '1'
 real_docker = pytest.mark.skipif(
     not DOCKER_ENABLED, reason='Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage',
@@ -45,7 +44,7 @@ def source() -> SourceSnapshot:
         issue_url='https://github.com/example/project/issues/7',
         issue_updated_at=now, fetched_at=now,
         repository_context=RepositoryContext(commit=COMMIT, tree=[], files=[],
-                                             omissions=['Archive fixture is fetched separately'], tree_truncated=False),
+                                             omissions=['Clone fixture is prepared separately'], tree_truncated=False),
     )
 
 
@@ -67,23 +66,120 @@ def archive(entries: list[tuple[tarfile.TarInfo, bytes]], *, compressed=True) ->
     return output.getvalue()
 
 
-def source_archive(files: dict[str, bytes] | None = None) -> bytes:
-    files = files if files is not None else {'calc.py': b'def add(a, b): return a - b\n'}
-    return archive([member(ROOT, kind=tarfile.DIRTYPE), *[
-        member(f'{ROOT}/{path}', content) for path, content in files.items()
-    ]])
 
 
-def source_transport(data: bytes) -> httpx.MockTransport:
-    def respond(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == SOURCE_URL:
-            assert request.headers['Authorization'] == f'Bearer {TOKEN}'
-            return httpx.Response(302, headers={'Location': CODELOAD_URL})
-        assert str(request.url) == CODELOAD_URL
-        assert 'Authorization' not in request.headers
-        return httpx.Response(200, content=data)
-    return httpx.MockTransport(respond)
 
+
+@pytest.mark.asyncio
+async def test_fixed_commit_clone_uses_real_local_git_and_preserves_metadata(tmp_path, monkeypatch):
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    assert (await command('git', 'init', '--quiet', '-b', 'main', cwd=upstream))[0] == 0
+    (upstream / 'calc.py').write_text('first\n')
+    assert (await command('git', 'add', 'calc.py', cwd=upstream))[0] == 0
+    assert (await command(
+        'git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '--quiet', '-m', 'first', cwd=upstream,
+    ))[0] == 0
+    first = (await command('git', 'rev-parse', 'HEAD', cwd=upstream))[1].strip()
+    (upstream / 'calc.py').write_text('second\n')
+    assert (await command(
+        'git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '--quiet', '-am', 'second', cwd=upstream,
+    ))[0] == 0
+
+    @asynccontextmanager
+    async def local_auth(repository_url, credentials, *, strategy):
+        home = tmp_path / 'home'
+        home.mkdir(exist_ok=True)
+        environment = workspace_module.os.environ.copy()
+        environment.update({
+            'HOME': str(home), 'GIT_CONFIG_NOSYSTEM': '1',
+            'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
+            'GIT_TERMINAL_PROMPT': '0', 'GIT_ALLOW_PROTOCOL': 'file',
+        })
+        yield GitAuthContext(upstream.as_uri(), environment, strategy)
+
+    monkeypatch.setattr('repopilot.execution.git.github_git_auth', local_auth)
+    destination = tmp_path / 'clone'
+    await clone_fixed_commit(
+        'https://github.com/example/project', first, destination,
+        GitHubGitCredentials(api_token=TOKEN, private_key=''), strategy='https_token',
+    )
+    assert (destination / '.git').is_dir()
+    assert (destination / 'calc.py').read_text() == 'first\n'
+    assert (await command('git', 'rev-parse', 'HEAD', cwd=destination))[1].strip() == first
+    assert (await command('git', 'config', 'user.name', cwd=destination))[1].strip() == 'RepoPilot'
+    assert (await command('git', 'config', 'user.email', cwd=destination))[1].strip() == 'repopilot@users.noreply.github.com'
+
+@pytest.mark.asyncio
+async def test_fixed_commit_clone_rejects_tracked_symlink(tmp_path, monkeypatch):
+    upstream = tmp_path / 'symlink-upstream'
+    upstream.mkdir()
+    assert (await command('git', 'init', '--quiet', '-b', 'main', cwd=upstream))[0] == 0
+    os.symlink('target.txt', upstream / 'linked.txt')
+    (upstream / 'target.txt').write_text('target\n')
+    assert (await command('git', 'add', '.', cwd=upstream))[0] == 0
+    assert (await command(
+        'git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '--quiet', '-m', 'symlink', cwd=upstream,
+    ))[0] == 0
+    commit = (await command('git', 'rev-parse', 'HEAD', cwd=upstream))[1].strip()
+
+    @asynccontextmanager
+    async def local_auth(repository_url, credentials, *, strategy):
+        environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(tmp_path),
+                       'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
+                       'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
+                       'GIT_TERMINAL_PROMPT': '0', 'GIT_ALLOW_PROTOCOL': 'file'}
+        yield GitAuthContext(upstream.as_uri(), environment, strategy)
+
+    monkeypatch.setattr('repopilot.execution.git.github_git_auth', local_auth)
+    from repopilot.execution.git import GitOperationError
+    with pytest.raises(GitOperationError, match='symlinks or submodules'):
+        await clone_fixed_commit(
+            'https://github.com/example/project', commit, tmp_path / 'clone-symlink',
+            GitHubGitCredentials(api_token=TOKEN, private_key=''), strategy='https_token',
+        )
+
+
+@pytest.mark.asyncio
+async def test_https_auth_is_ephemeral_and_token_is_not_in_url_or_git_config(tmp_path):
+    from repopilot.execution.git import github_git_auth
+    credentials = GitHubGitCredentials(api_token=TOKEN, private_key='')
+    assert TOKEN not in repr(credentials)
+    async with github_git_auth(
+        'https://github.com/example/project', credentials, strategy='https_token',
+    ) as auth:
+        assert auth.repository_url == 'https://github.com/example/project'
+        assert TOKEN not in auth.repository_url
+        assert TOKEN not in repr(auth.environment)
+        assert auth.environment['GIT_CONFIG_NOSYSTEM'] == '1'
+        assert auth.environment['GIT_CONFIG_GLOBAL'] == os.devnull
+        helper = Path(auth.environment['GIT_CONFIG_VALUE_5'])
+        token_file = Path(auth.environment['REPOPILOT_GIT_TOKEN_FILE'])
+        assert helper.is_file() and token_file.read_text() == TOKEN
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    assert not token_file.exists()
+
+@pytest.mark.asyncio
+async def test_ssh_auth_uses_pinned_hosts_and_ephemeral_private_key():
+    from repopilot.execution.git import github_git_auth
+    credentials = GitHubGitCredentials(api_token=TOKEN, private_key=PRIVATE_KEY)
+    assert PRIVATE_KEY not in repr(credentials)
+    async with github_git_auth(
+        'https://github.com/example/project', credentials, strategy='ssh_key',
+    ) as auth:
+        assert auth.repository_url == 'git@github.com:example/project.git'
+        assert TOKEN not in repr(auth.environment)
+        command_value = auth.environment['GIT_SSH_COMMAND']
+        assert 'StrictHostKeyChecking=yes' in command_value
+        assert 'IdentitiesOnly=yes' in command_value
+        assert 'ssh-keyscan' not in command_value
+        key_path = Path(command_value.split(' -i ', 1)[1].split(' ', 1)[0])
+        assert key_path.read_text() == PRIVATE_KEY
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert not key_path.exists()
 
 @pytest.mark.parametrize('entries', [
     [member('first/a'), member('second/b')],
@@ -157,117 +253,6 @@ def test_archive_rejects_malformed_compressed_data(tmp_path):
         extract_archive(b'not a tar archive', tmp_path / 'baseline', strip_root=True)
 
 
-@pytest.mark.asyncio
-async def test_download_fixed_commit_removes_token_on_allowed_redirect():
-    data = source_archive()
-    actual = await download_source(source(), TOKEN, transport=source_transport(data))
-    assert actual == data
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('location', [
-    'http://codeload.github.com/example/project/legacy.tar.gz/' + COMMIT,
-    'https://evil.example/example/project/legacy.tar.gz/' + COMMIT,
-    'https://codeload.github.com/other/project/legacy.tar.gz/' + COMMIT,
-    'https://codeload.github.com/example/other/legacy.tar.gz/' + COMMIT,
-    'https://codeload.github.com/example/project/legacy.tar.gz/' + 'b' * 40,
-    'https://codeload.github.com/example/project/legacy.tar.gz/main',
-    'https://user:password@codeload.github.com/example/project/legacy.tar.gz/' + COMMIT,
-    'https://codeload.github.com:444/example/project/legacy.tar.gz/' + COMMIT,
-    'https://codeload.github.com/example/project/legacy.tar.gz/' + COMMIT + '?token=secret',
-    'https://codeload.github.com/example/project/legacy.tar.gz/' + COMMIT + '#fragment',
-    'https://codeload.github.com/example/project/../other/legacy.tar.gz/' + COMMIT,
-    '//evil.example/archive',
-])
-async def test_download_does_not_follow_untrusted_redirect(location):
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        assert str(request.url) == SOURCE_URL
-        return httpx.Response(302, headers={'Location': location})
-
-    with pytest.raises(WorkspaceError) as error:
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-    assert len(requests) == 1
-    assert TOKEN not in str(error.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('status', [301, 303, 307, 308])
-async def test_download_only_accepts_api_302_redirect(status):
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(status, headers={'Location': CODELOAD_URL})
-
-    with pytest.raises(WorkspaceError):
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-    assert len(requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_download_rejects_second_redirect_without_forwarding_token():
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        if len(requests) == 1:
-            return httpx.Response(302, headers={'Location': CODELOAD_URL})
-        assert 'Authorization' not in request.headers
-        return httpx.Response(302, headers={'Location': 'https://evil.example/archive'})
-
-    with pytest.raises(WorkspaceError):
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-    assert len(requests) == 2
-
-
-class ChunkedBody(httpx.AsyncByteStream):
-    async def __aiter__(self):
-        yield b'1234'
-        yield b'5678'
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('headers', [{}, {'Content-Length': '8'}])
-async def test_download_compressed_limit_covers_stream_and_declared_length(monkeypatch, headers):
-    monkeypatch.setattr(workspace_module, 'MAX_COMPRESSED', 7)
-
-    def respond(request):
-        if request.url.host == 'api.github.com':
-            return httpx.Response(302, headers={'Location': CODELOAD_URL})
-        return httpx.Response(200, headers=headers, stream=ChunkedBody())
-
-    with pytest.raises(WorkspaceError):
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('status', [401, 403, 404, 500])
-async def test_download_http_errors_do_not_expose_provider_body_or_token(status):
-    def respond(request):
-        return httpx.Response(status, text=f'provider secret {TOKEN}')
-
-    with pytest.raises(WorkspaceError) as error:
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-    assert TOKEN not in str(error.value)
-    assert 'provider secret' not in str(error.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('error_type', [httpx.ConnectError, httpx.ReadTimeout])
-async def test_download_network_errors_are_safe_and_not_retried(error_type):
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        raise error_type(f'upstream failure {TOKEN}', request=request)
-
-    with pytest.raises(WorkspaceError) as error:
-        await download_source(source(), TOKEN, transport=httpx.MockTransport(respond))
-    assert TOKEN not in str(error.value)
-    assert len(requests) == 1
 
 
 @pytest.mark.asyncio
@@ -365,16 +350,26 @@ async def test_patch_limit_never_returns_truncated_applicable_patch(tmp_path, mo
 
 
 @pytest_asyncio.fixture
-async def docker_workspace():
+async def docker_workspace(monkeypatch):
     if not DOCKER_ENABLED:
         pytest.skip('Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage')
     assert shutil.which('docker'), 'Docker tests enabled but Docker CLI is unavailable'
     code, output = await command('docker', 'info', '--format', '{{.ServerVersion}}')
     assert code == 0, f'Docker tests enabled but Docker daemon is unavailable: {output}'
     image = os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local')
-    workspace = Workspace(uuid4(), source_transport=source_transport(source_archive()))
+    async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
+        destination.mkdir()
+        (destination / '.git').mkdir()
+        (destination / '.git/config').write_text('[core]\nrepositoryformatversion = 0\n')
+        (destination / 'calc.py').write_text('def add(a, b): return a - b\n')
+    monkeypatch.setattr(workspace_module, 'clone_fixed_commit', clone_fixture)
+    workspace = Workspace(uuid4())
     try:
-        image_id = await workspace.prepare(source=source(), github_token=TOKEN, image=image)
+        image_id = await workspace.prepare(
+            source=source(),
+            github_credentials=GitHubGitCredentials(api_token=TOKEN, private_key=''),
+            git_auth_strategy='https_token', image=image,
+        )
         yield workspace, image_id
     finally:
         await workspace.cleanup()
@@ -402,6 +397,7 @@ async def test_real_docker_source_import_permissions_mounts_and_network(docker_w
         "python3 -c 'import os, pathlib; "
         "assert os.getuid() == 1000; assert os.getgid() == 1000; "
         "p=pathlib.Path(\"calc.py\"); assert p.stat().st_uid == 1000; "
+        "assert pathlib.Path(\".git/config\").is_file(); "
         "assert p.read_text() == \"def add(a, b): return a - b\\n\"; "
         "assert os.environ[\"HOME\"] == \"/home/runner\"; "
         "assert not pathlib.Path(\"/var/run/docker.sock\").exists(); "
@@ -497,6 +493,7 @@ async def test_real_docker_capture_patch_uses_external_baseline(tmp_path, docker
     result = await workspace.shell("printf 'def add(a, b): return a + b\\n' > calc.py; mkdir -p node_modules; printf 'cache' > node_modules/cache")
     assert result.exit_code == 0, result.output
     patch = await workspace.capture()
+    assert '.git/' not in patch
     baseline = tmp_path / 'fresh'
     baseline.mkdir()
     (baseline / 'calc.py').write_text('def add(a, b): return a - b\n')
@@ -514,11 +511,14 @@ async def test_real_docker_capture_patch_uses_external_baseline(tmp_path, docker
 @pytest.mark.asyncio
 async def test_real_docker_missing_image_is_blocked_without_pull_or_container():
     assert shutil.which('docker'), 'Docker tests enabled but Docker CLI is unavailable'
-    workspace = Workspace(uuid4(), source_transport=source_transport(source_archive()))
+    workspace = Workspace(uuid4())
     try:
         with pytest.raises(WorkspaceError) as error:
-            await workspace.prepare(source=source(), github_token=TOKEN,
-                                    image=f'repopilot-regression-absent:{uuid4().hex}')
+            await workspace.prepare(
+                source=source(),
+                github_credentials=GitHubGitCredentials(api_token=TOKEN, private_key=''),
+                git_auth_strategy='https_token', image=f'repopilot-regression-absent:{uuid4().hex}',
+            )
         assert error.value.blocked is True
         assert '执行镜像不存在' in str(error.value)
         code, _ = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')

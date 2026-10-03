@@ -1,14 +1,16 @@
 # RepoPilot
 
-RepoPilot 是面向 Python、React 和 Vue 仓库的目标驱动编码工作台：从固定 GitHub Issue 与 commit 建立上下文，生成人工确认的 Goal，再显式启动 Docker 内的 Agent，审阅检查记录、代码差异和报告。
+RepoPilot 是面向 Python、React 和 Vue 仓库的目标驱动编码工作台：从固定 GitHub Issue 与 commit 建立上下文，生成人工确认的 Goal，再显式启动 Docker 内的 Agent，审阅检查记录、代码差异和报告，并可显式把已完成 Run 的成果提交为自己仓库中的修复分支。
 
 ```text
 固定仓库 / commit / Issue → 生成与修改 Goal → 人工批准
                                               ↓ 单独确认启动
                            Docker Run → 实际检查 → Patch / 报告审阅
+                                                               ↓ 单独确认交付
+                                           唯一修复分支 → GitHub 网页端人工合并
 ```
 
-**批准 Goal 不会自动执行。检查通过不等于独立验收，结果仍需人工审阅。**
+**批准 Goal 不会自动执行，Run 完成也不会自动提交分支。检查通过不等于独立验收；系统不自动创建 PR、批准或合并。**
 
 - 当前功能、安装和操作说明：本文。
 - 功能演进、修复和历史验收：[CHANGELOG.md](CHANGELOG.md)。
@@ -22,9 +24,11 @@ RepoPilot 是面向 Python、React 和 Vue 仓库的目标驱动编码工作台�
 - 显式创建 Run，由单个顺序 Worker 在独占 Docker 容器中执行。
 - 自动解析 Python/Node 项目，创建各自的 `.venv` / 前端依赖环境，配置真实语言服务器；用户无需填写镜像、安装或检查命令。
 - 轮询执行状态，查看工具日志、实际命令、退出码、报告与 Diff，下载 `.patch` 和 `.json`。
+- 对已完成且包含非空 Patch 的 Run 显式创建唯一 Commit 并推送自己仓库的修复分支；支持安全重试核对，合并留在 GitHub 网页端人工完成。
 - 支持取消与中断清理；切换页面、刷新或退出登录不会取消 Run。
+- Web 正文与 Naive UI 组件统一使用衬线字体，优先使用本机 Noto Serif / 中文宋体类字体，无可用字体时回退至系统 serif；commit 输入框保留等宽字体。
 
-不支持 SSE、执行中反馈、继承上一轮成果继续修改或 PR 发布。每次 Run 都从固定 commit 重新开始。当前自动环境与语义工具仅覆盖 Python 和 Node 前端（JS/TS/React/Vue、HTML/CSS/JSON），不加入其他语言执行器。依赖下载失败、版本约束冲突或缺少可信检查入口会明确失败或受阻，不伪造成功；完整真实项目任务集与独立验收仍需扩展。
+不支持 SSE、执行中反馈、继承上一轮成果继续修改或自动创建 PR/批准/合并。每次 Run 都从固定 commit 重新开始；修复分支提交必须由用户在审阅成果后单独触发。当前自动环境与语义工具仅覆盖 Python 和 Node 前端（JS/TS/React/Vue、HTML/CSS/JSON），不加入其他语言执行器。依赖下载失败、版本约束冲突或缺少可信检查入口会明确失败或受阻，不伪造成功；完整真实项目任务集与独立验收仍需扩展。
 
 ## 快速开始：Docker 部署
 
@@ -59,21 +63,20 @@ docker compose ps
 | `api` | FastAPI、鉴权与业务接口 | `8000` |
 | `postgres` | 设置、对话、Goal、Run、日志和成果 | `5432` |
 | `redis` | 模型列表缓存，TTL 300 秒 | `6379` |
-| `worker` | 顺序领取和执行 Run，需启用 `execution` profile | 不暴露端口 |
+| `worker` | 默认启动，顺序领取和执行 Run | 不暴露端口 |
+| `runtime` | 构建执行镜像并检查 Python 后退出；退出码 0 为正常状态 | 不暴露端口 |
 
 宿主端口均绑定 `127.0.0.1`。API 启动要求 PostgreSQL 和 Redis 均可连接。Redis 使用独立数据卷与 AOF，不承担执行队列或业务数据的权威存储。
 
-### 3. 准备执行环境并启用 Worker
+### 3. 执行环境与 Worker
 
-```bash
-docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .
-docker compose --profile execution up -d --build worker
-docker compose --profile execution ps
-```
+上面的 `docker compose up -d --build --wait` 同时构建执行镜像并启动 Worker，无需额外 profile 或手动构建。Worker 等待 API 健康、`runtime` 成功退出后启动。首次构建需下载 Python、Node 和语言服务器依赖，耗时取决于网络；Docker 守护进程代理不会自动代理构建步骤中的依赖下载。
+
+默认启动包含 Docker socket 挂载，需在可信宿主机运行。Worker 启动后会处理已排队 Run，无需重复提交。使用 `docker compose logs worker` 查看执行状态。
 
 执行镜像提供 Python 3.12、Node 22、uv、npm/pnpm/yarn 和独立安装的 Pyright、Ruff、TypeScript/Vue、HTML/CSS/JSON 语言服务器。不同项目的依赖不会安装到 Worker 或语言服务器目录；LSP 绑定项目自己的解释器与 TypeScript SDK。
 
-部署者构建一次镜像并启动 Worker 后，任务用户不再选择环境。`EXECUTION_IMAGE` 是服务端镜像配置，不是客户端表单字段；Worker 必须能访问该镜像，缺失则 Run 为 `blocked`。Python 可自动从 uv 管理的工具链中选择满足约束的版本；Node 可自动匹配 20/22 系列并校验官方下载。没有 Worker 时，Run 保持排队。
+任务用户不再选择环境。`EXECUTION_IMAGE` 是服务端镜像配置，同时作为 Compose 构建的执行镜像标签，不是客户端表单字段；Worker 必须能访问该镜像，缺失则 Run 为 `blocked`。Python 可自动从 uv 管理的工具链中选择满足约束的版本；Node 可自动匹配 20/22 系列并校验官方下载。Worker 被手动停止或异常退出时，Run 仍可能保持排队；排除故障后用 `docker compose up -d worker` 启动。
 
 ### 主要配置
 
@@ -97,11 +100,13 @@ Compose 会给 API/Worker 注入容器网络连接地址。容器访问宿主机
 
 1. 在模型设置中填写 Chat Completions 端点和 API Key，刷新模型列表、选择模型并保存。支持无需 API Key 的端点。
 2. 同一端点省略 API Key 时保留已保存密钥；更换端点不会复用旧密钥。模型列表按端点与密钥隔离，在 Redis 中缓存 300 秒。
-3. 保存 GitHub token。私有仓库建议使用限定仓库的 fine-grained token，授予 `Contents: Read-only` 和 `Issues: Read-only`；组织可能另需批准。
+3. 保存 GitHub token。私有仓库建议使用限定仓库的 fine-grained token：来源与执行需要 `Contents: Read-only` 和 `Issues: Read-only`；显式提交修复分支还需要 `Contents: Read and write`。组织可能另需批准。
 
-保存 GitHub token 只做本地加密持久化，不发起 GitHub 写入，也不等于已经验证仓库权限。来源访问在创建对话时校验。
+保存 GitHub token 只做本地加密持久化，不发起 GitHub 写入，也不等于已经验证仓库权限。来源访问在创建对话时校验；只有用户在已完成 Run 上显式点击提交修复分支才会写入仓库。
 
-SSH 公钥授权是单独的可选操作，**生成 Goal 和运行 Agent 不需要 SSH 授权**。仅明确点击授权才向 GitHub 注册公钥，该操作需要额外的 SSH keys 写权限。
+Run 使用真实 Git clone 并检出固定 commit，不再下载 GitHub 源码归档。已保存 SSH 私钥时，Worker 使用该私钥并严格校验 GitHub 主机密钥；此时公钥必须已授权到可访问仓库的 GitHub 账号。没有私钥时使用已保存 API token 进行 HTTPS clone，不自动在两种认证方式之间回退。公钥注册仍是独立、显式的操作；保存凭据不会自动注册。Issue/上下文读取和修复分支推送使用 API token。
+
+克隆工作区保留 `.git`，默认 Git 身份为 `RepoPilot <repopilot@users.noreply.github.com>`。凭据只在可信控制面临时使用，不写入仓库 URL/配置，也不进入执行容器；Patch 排除 `.git`。当前拒绝包含 symlink 或 submodule 的源码树，不会把它们静默转换为普通文件或空目录。
 
 ### 创建和批准 Goal
 
@@ -131,6 +136,12 @@ SSH 公钥授权是单独的可选操作，**生成 Goal 和运行 Agent 不需�
 取消排队 Run 可立即结束；取消运行中 Run 会先显示正在停止，确认进程与容器清理成功后才进入终态。Worker 重启会清理遗留容器并标记中断，不重放未知工具动作；清理失败则保留 `running`，停止领取新任务。
 
 提交结果不明时只重新读取，不自动重发。读取失败保留已有内容，并要求显式重读。报告、日志和 Patch 均按纯文本展示。
+
+### 修复分支交付
+
+只有状态为 `completed`、成果捕获完整且 Patch 非空的 Run 可以交付。用户审阅后单独点击“提交修复分支”；API 仅允许 GitHub token 所属用户自己的仓库，在可信控制面重新克隆 Run 固定的完整 commit SHA，先校验并应用已保存 Patch，不执行来源代码，再以 `RepoPilot <repopilot@users.noreply.github.com>` 创建确定性的 Commit，推送 `repopilot/run-<run-id>` 唯一分支。原默认分支不会被改写。
+
+同一 Run 的并发点击只允许一个交付；重复请求返回已经保存的结果。若推送响应不明，后续显式重试会核对同一远端分支与 Commit，不使用 force push，也不会覆盖内容不同的已有分支。GitHub token 通过临时凭据机制提供给 Git，不写入 URL、仓库配置或日志。交付不会把凭据传入 Run 容器，也不会自动创建 PR、批准或合并；界面提供 GitHub compare 链接，最终合并由用户在网页端人工完成。
 
 ### 语义工具与文件一致性
 
@@ -165,7 +176,7 @@ LSP 在 Run 容器中按项目运行，查询前同步已变更文件。Shell、
 普通停止保留数据卷：
 
 ```bash
-docker compose --profile execution down
+docker compose down
 ```
 
 **不要使用 `down -v`，除非明确要删除数据。** 删除 PostgreSQL 卷会清空模型/GitHub 设置、对话、Goal、Run 和日志，重建后需重新配置。
@@ -251,5 +262,6 @@ development-plan/     # 产品规划与架构决策
 | `POST /api/tasks/{id}/runs` | 显式排队，返回 202；仅提交 `expected_revision`、`goal_version`，环境与检查由系统选择 |
 | `GET /api/tasks/{id}/runs`、`GET /api/tasks/{id}/runs/{run_id}` | 最近 50 条 Run 与单次详情 |
 | `POST /api/tasks/{id}/runs/{run_id}/cancel` | 请求取消 |
+| `POST /api/tasks/{id}/runs/{run_id}/delivery` | 显式交付已完成的非空 Patch，创建或核对唯一 Commit 与修复分支，返回分支及 compare 链接；空 JSON 请求体，不自动创建 PR 或合并 |
 
 409 冲突需重新读取并人工确认。模型服务认证失败返回安全 502，不作为工作台 401 清除登录会话。`GET /api/health` 用于服务健康检查。

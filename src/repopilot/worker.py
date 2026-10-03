@@ -12,6 +12,7 @@ from repopilot.config import get_settings
 from repopilot.domain.runs import ClaimedRun
 from repopilot.domain.tasks import TaskError
 from repopilot.execution.engine import EmissionError, ExecutionEngine, ExecutionResult
+from repopilot.execution.git import GitHubGitCredentials
 from repopilot.persistence.database import Database
 from repopilot.persistence.runs import RunRepository
 from repopilot.persistence.settings import (
@@ -108,14 +109,16 @@ class Worker:
                 persistence_failed = True
                 raise _PersistenceFailure from None
             token = github.api_token.get_secret_value()
-            secrets = (model.api_key, token, github.private_key.get_secret_value())
+            private_key = github.private_key.get_secret_value()
+            secrets = (model.api_key, token, private_key)
             if not await self.repository.set_model(
                 run.id, run.worker_token, endpoint=model.base_url, model=model.model,
             ):
                 persistence_failed = True
                 raise _PersistenceFailure
-            if not model.model.strip() or not token:
-                return ExecutionResult('blocked', '执行需要已选择的模型和 GitHub 读取凭据', '', [])
+            if not model.model.strip() or not (private_key or token):
+                return ExecutionResult('blocked', '执行需要已选择的模型和 GitHub 克隆凭据', '', [])
+            git_auth_strategy = 'ssh_key' if private_key else 'https_token'
 
             async def emit(kind: str, payload: dict) -> None:
                 nonlocal persistence_failed
@@ -141,8 +144,9 @@ class Worker:
                 return ExecutionResult('cancelled', '', '', [])
             return await self.engine.run(
                 run_id=run.id, source=run.source_snapshot, goal=run.goal_content,
-                model=model, github_token=token, image=run.image,
-                emit=emit,
+                model=model,
+                github_credentials=GitHubGitCredentials(api_token=token, private_key=private_key),
+                git_auth_strategy=git_auth_strategy, image=run.image, emit=emit,
             )
 
         task = asyncio.create_task(execute())

@@ -134,13 +134,17 @@ class RunRepository:
         return RunSummary(**{key: getattr(row, key) for key in RunSummary.model_fields})
 
     async def _detail(self, session: AsyncSession, row: RunRow) -> RunDetail:
+        from repopilot.persistence.deliveries import DeliveryRepository, RunDeliveryRow
+
         events = (await session.scalars(select(RunEventRow).where(
             RunEventRow.run_id == row.id).order_by(RunEventRow.id).limit(MAX_EVENTS))).all()
+        delivery = DeliveryRepository.public(await session.get(RunDeliveryRow, row.id))
         return RunDetail(
             **self._summary(row).model_dump(), image=row.image, image_id=row.image_id,
             setup_command=row.setup_command, check_command=row.check_command,
             report=row.report, patch=row.patch, checks=row.checks,
             events=[RunEvent(id=e.id, kind=e.kind, payload=e.payload, created_at=e.created_at) for e in events],
+            delivery=delivery,
         )
 
     @staticmethod

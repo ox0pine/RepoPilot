@@ -12,6 +12,8 @@ RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositor
 - PostgreSQL is authoritative for settings, tasks, Goal versions, messages, Runs and bounded Run events. Redis retains the original 300-second model-list cache, isolated by normalized endpoint and API key; a cache hit avoids a provider request. Expired/invalid/unavailable cache falls through to the provider, never to stale data on provider failure. API startup requires PostgreSQL and Redis. No JSON fallback or old database/schema migration support.
 - Correction (D-022): removing Redis was an unauthorized mistake, now reversed. The authorized PostgreSQL reset and current-format-only source/key/Goal contracts remain in force; do not restore old business data. Historical verification stays historical; report Redis restoration checks only after actually running them.
 - Execution: Run creation only queues under the Task lock and increments revision; its request contains only expected_revision and goal_version. Image is server configuration, not a user field. A single `python -m repopilot.worker` owns session advisory lock 721804630 and executes FIFO outside transactions. System automatically detects Python/Node projects, provisions matching tools/dependencies, chooses real existing checks, then disconnects preparation networking before model tools. Containers have readonly roots, limited executable tmpfs/resources, no host mounts/socket/credentials. Token-fenced writes prevent late workers; cleanup must succeed before cancelled/interrupted. Startup retires orphan Runs rather than replaying unknown effects. Every Run starts from its fixed commit.
+- Source preparation uses authenticated real Git clone and exact detached checkout, not archive downloads. A saved SSH private key selects strict pinned-host SSH; without a private key, HTTPS uses an ephemeral token helper. Credentials remain on the trusted control plane; the sandbox retains credential-free `.git`, excluded from Patch capture. Default Git identity is `RepoPilot <repopilot@users.noreply.github.com>`.
+- Delivery is an explicit action for completed Runs with nonempty Patch: reclone the fixed baseline, apply Patch without host source execution, commit and push a deterministic repair branch to the saved-token user's own repository. `run_deliveries` fences concurrent attempts and reconciles explicit retries. Never automatically create/approve/merge PRs or write the default branch; the UI links to GitHub for human merge.
 - Frontend: Vue composition API with typed API wrappers, a lightweight custom router, and module-level reactive stores—not Pinia or Vue Router. Requests flow through `web/src/api/client.ts`; `App.vue` coordinates authentication and page selection. Workbench credentials/data are shared, not per-user isolated.
 
 ## Key Directories
@@ -21,7 +23,7 @@ RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositor
 - `execution/environment.py` and `execution/lsp/`: automatic per-root Python `.venv` / Node environments and confined Pyright/Ruff/TS/Vue/HTML/CSS/JSON servers. Host RepoPilot development still uses Conda, never its own `.venv`. Preserve version/hash-fenced workspace edits, explicit unsupported/not-ready diagnostics, UTF16 conversion, and server shutdown before Shell/capture. Do not reintroduce manual environment/setup/check form fields.
 - `web/src/{views,components,api,router,stores,styles}/`: pages, reusable UI, HTTP contracts, navigation, shared state, and theme ownership.
 - `tests/`: backend domain/client, database-concurrency, and ASGI route tests.
-- `deploy/`: API/frontend/worker/runtime Dockerfiles and Nginx configuration; only the optional `execution` profile worker mounts the Docker socket. `development-plan/`: product boundaries, historical roadmap, and current D-021 decision.
+- `deploy/`: API/frontend/worker/runtime Dockerfiles and Nginx configuration. Compose builds the runtime image and starts the worker by default; only worker mounts the Docker socket. The runtime initialization service exits successfully before worker starts. `development-plan/`: historical roadmap and product decisions; current operations are in README.
 - `reference/` is ignored comparison material, not application code or an import source. `.repopilot/` and `tmp/` are local runtime/acceptance material, not maintained source. No root scripts directory or Makefile is provided.
 
 ## Development Commands
@@ -38,10 +40,10 @@ python -m pip install --no-deps --editable .
 docker compose up -d --wait postgres redis
 python -m repopilot
 
-# Optional execution, only after preparing Docker and saved credentials.
+# Host worker alternative: do not run alongside the default Compose worker.
 docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .
 python -m repopilot.worker
-# Containerized worker is opt-in: docker compose --profile execution up -d --build worker
+# Full Compose startup below already builds runtime and starts worker; no profile needed.
 
 # Frontend development / production type-check and build.
 npm --prefix web ci

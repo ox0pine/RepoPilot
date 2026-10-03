@@ -6,22 +6,21 @@ import io
 import json
 import os
 import shutil
+import signal
 import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlsplit
 from uuid import UUID
 
-import httpx
-
-from repopilot.domain.tasks import (
-    SourceSnapshot,
-    normalize_baseline_commit,
-    normalize_github_repository_url,
+from repopilot.domain.tasks import SourceSnapshot
+from repopilot.execution.git import (
+    GitAuthStrategy,
+    GitHubGitCredentials,
+    GitOperationError,
+    clone_fixed_commit,
 )
 
-MAX_COMPRESSED = 50 * 1024 * 1024
 MAX_EXPANDED = 200 * 1024 * 1024
 MAX_MEMBERS = 20_000
 MAX_PATCH = 8 * 1024 * 1024
@@ -88,7 +87,7 @@ async def _process(args: list[str], *, data: bytes | None = None, timeout: float
             task.cancel()
         if proc.returncode is None:
             try:
-                proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         await proc.wait()
@@ -167,52 +166,6 @@ def extract_archive(data: bytes, destination: Path, *, strip_root: bool) -> None
         raise WorkspaceError('源码归档无效或无法安全展开') from None
 
 
-async def download_source(source: SourceSnapshot, token: str, *, transport: httpx.AsyncBaseTransport | None = None) -> bytes:
-    try:
-        async with asyncio.timeout(60):
-            return await _download_source(source, token, transport=transport)
-    except TimeoutError:
-        raise WorkspaceError('固定版本源码下载超时', blocked=True) from None
-
-
-async def _download_source(source: SourceSnapshot, token: str, *, transport: httpx.AsyncBaseTransport | None = None) -> bytes:
-    repository = normalize_github_repository_url(source.repository_url).removeprefix('https://github.com/')
-    commit = normalize_baseline_commit(source.baseline_commit)
-    url = f'https://api.github.com/repos/{repository}/tarball/{commit}'
-    headers = {'Accept': 'application/vnd.github+json', 'Authorization': f'Bearer {token}',
-               'X-GitHub-Api-Version': '2022-11-28', 'Accept-Encoding': 'identity'}
-    try:
-        async with httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=35) as client:
-            async with client.stream('GET', url, headers=headers) as response:
-                if response.status_code == 302:
-                    location = response.headers.get('location', '')
-                    parsed = urlsplit(location)
-                    if (parsed.scheme != 'https' or parsed.netloc != 'codeload.github.com'
-                            or parsed.query or parsed.fragment or parsed.path not in (
-                                f'/{repository}/legacy.tar.gz/{commit}', f'/{repository}/tar.gz/{commit}')):
-                        raise WorkspaceError('源码下载重定向不安全')
-                elif response.status_code == 200:
-                    return await _response_bytes(response)
-                else:
-                    raise WorkspaceError('无法读取固定版本源码，请检查 GitHub 权限', blocked=True)
-            # Explicitly omit all authorization headers at the cross-origin boundary.
-            async with client.stream('GET', location, headers={'Accept': 'application/octet-stream', 'Accept-Encoding': 'identity'}) as response:
-                if response.status_code != 200:
-                    raise WorkspaceError('无法下载固定版本源码', blocked=True)
-                return await _response_bytes(response)
-    except httpx.HTTPError:
-        raise WorkspaceError('固定版本源码下载失败', blocked=True) from None
-
-
-async def _response_bytes(response: httpx.Response) -> bytes:
-    if response.headers.get('content-encoding', 'identity') != 'identity':
-        raise WorkspaceError('源码下载包含不支持的传输压缩')
-    result = bytearray()
-    async for chunk in response.aiter_bytes():
-        if len(result) + len(chunk) > MAX_COMPRESSED:
-            raise WorkspaceError('源码压缩归档超过安全上限')
-        result.extend(chunk)
-    return bytes(result)
 
 
 def _patch_paths(patch: str) -> str:
@@ -247,7 +200,7 @@ async def generate_patch(baseline: Path, final: Path) -> str:
     with tempfile.TemporaryDirectory(prefix='repopilot-diff-') as temporary:
         root = Path(temporary)
         before, after = root / 'a', root / 'b'
-        shutil.copytree(baseline, before)
+        shutil.copytree(baseline, before, ignore=shutil.ignore_patterns('.git'))
         shutil.copytree(final, after)
         tracked = {p.relative_to(before).as_posix() for p in before.rglob('*') if p.is_file()}
         candidates = [p.relative_to(after).as_posix() for p in after.rglob('*') if p.is_file() and p.relative_to(after).as_posix() not in tracked]
@@ -288,10 +241,9 @@ async def generate_patch(baseline: Path, final: Path) -> str:
 
 
 class Workspace:
-    def __init__(self, run_id: UUID, *, source_transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, run_id: UUID) -> None:
         self.run_id = UUID(str(run_id))
         self.container_name = f'repopilot-run-{self.run_id}'
-        self.source_transport = source_transport
         self.image_id: str | None = None
         self.prepared = False
         self._frozen = False
@@ -307,7 +259,8 @@ class Workspace:
     async def _docker(self, *args: str, **kwargs) -> tuple[int, bytes, bytes]:
         return await _process(['docker', *args], **kwargs)
 
-    async def prepare(self, *, source: SourceSnapshot, github_token: str, image: str) -> str:
+    async def prepare(self, *, source: SourceSnapshot, github_credentials: GitHubGitCredentials,
+                      git_auth_strategy: GitAuthStrategy, image: str) -> str:
         if self.prepared or self._temporary is not None:
             raise WorkspaceError('Workspace has already been prepared')
         rc, out, _ = await self._docker('image', 'inspect', '--format', '{{json .}}', '--', image, limit=1024 * 1024)
@@ -328,8 +281,13 @@ class Workspace:
         self.baseline = Path(self._temporary.name) / 'baseline'
         self.final = Path(self._temporary.name) / 'final'
         try:
-            archive = await download_source(source, github_token, transport=self.source_transport)
-            extract_archive(archive, self.baseline, strip_root=True)
+            try:
+                await clone_fixed_commit(
+                    source.repository_url, source.baseline_commit, self.baseline, github_credentials,
+                    strategy=git_auth_strategy,
+                )
+            except GitOperationError:
+                raise WorkspaceError('无法通过已保存的 GitHub 凭据克隆固定版本源码', blocked=True) from None
             rc, _, _ = await self._docker('create', '--name', self.container_name, '--pull=never',
                 '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--cpus=2',
                 '--memory=4g', '--pids-limit=512', '--network=none', '--user=1000:1000',
@@ -544,7 +502,8 @@ class Workspace:
                 self._frozen = True
                 program = Path(__file__).with_name('container_helper.py').read_text()
                 try:
-                    tracked = [p.relative_to(self.baseline).as_posix() for p in self.baseline.rglob('*') if p.is_file()]
+                    tracked = [p.relative_to(self.baseline).as_posix() for p in self.baseline.rglob('*')
+                               if p.is_file() and '.git' not in p.relative_to(self.baseline).parts]
                     rc, archive, _ = await self._docker('exec', '-i', '--user=1000:1000', '--workdir=/workspace',
                         self.container_name, 'python3', '-I', '-S', '-c', program, 'capture',
                         data=json.dumps(tracked).encode(), limit=MAX_EXPANDED + MAX_MEMBERS * 2048, timeout=90)

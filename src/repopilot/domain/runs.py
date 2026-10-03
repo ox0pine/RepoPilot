@@ -21,6 +21,26 @@ class CreateRunRequest(BaseModel):
     goal_version: PositiveInt
 
 
+DeliveryStatus = Literal['completed']
+
+
+class RunDelivery(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    status: DeliveryStatus
+    branch: str
+    commit_sha: str
+    branch_url: str
+    compare_url: str
+    created_at: UTCDateTime
+
+
+class CreateDeliveryRequest(BaseModel):
+    """Empty, explicit command body; rejects accidental delivery options."""
+
+    model_config = ConfigDict(extra='forbid')
+
+
 class RunCheck(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -59,6 +79,7 @@ class RunDetail(RunSummary):
     patch: str = ''
     checks: list[RunCheck] = Field(default_factory=list)
     events: list[RunEvent] = Field(default_factory=list)
+    delivery: RunDelivery | None = None
 
 
 @dataclass(frozen=True)

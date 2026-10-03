@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from repopilot.api.security import require_auth
 from repopilot.application.runs import RunService
-from repopilot.domain.runs import CreateRunRequest, RunDetail, RunSummary
+from repopilot.domain.runs import CreateDeliveryRequest, CreateRunRequest, RunDelivery, RunDetail, RunSummary
 from repopilot.domain.tasks import TaskError
+from repopilot.integration.delivery import DeliveryService
 
 
-def build_router(service: RunService, default_image: str) -> APIRouter:
+def build_router(service: RunService, delivery_service: DeliveryService, default_image: str) -> APIRouter:
     router = APIRouter(tags=['runs'], dependencies=[Depends(require_auth)])
 
     async def operation(awaitable):
@@ -38,5 +39,11 @@ def build_router(service: RunService, default_image: str) -> APIRouter:
     @router.post('/tasks/{task_id}/runs/{run_id}/cancel', response_model=RunDetail)
     async def cancel_run(task_id: UUID, run_id: UUID) -> RunDetail:
         return await operation(service.cancel(task_id, run_id))
+
+    @router.post('/tasks/{task_id}/runs/{run_id}/delivery', response_model=RunDelivery, status_code=201)
+    async def create_delivery(
+        task_id: UUID, run_id: UUID, payload: CreateDeliveryRequest,
+    ) -> RunDelivery:
+        return await operation(delivery_service.create(task_id, run_id))
 
     return router

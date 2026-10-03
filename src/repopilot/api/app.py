@@ -23,6 +23,8 @@ from repopilot.integration.task_sources import GitHubSourceClient
 from repopilot.persistence.tasks import TaskRepository
 from repopilot.application.runs import RunService
 from repopilot.persistence.runs import RunRepository
+from repopilot.integration.delivery import DeliveryService
+from repopilot.persistence.deliveries import DeliveryRepository
 
 from .routes.auth import build_router as build_auth_router
 from .routes.models import build_router as build_models_router
@@ -49,6 +51,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         GitHubSourceClient(), GoalClient(),
     )
     run_service = RunService(RunRepository(database, default_image=runtime.execution_image))
+    delivery_service = DeliveryService(DeliveryRepository(database), github_repository)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,7 +86,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(build_settings_router(service, github_service), prefix="/api")
     app.include_router(build_models_router(service), prefix="/api")
     app.include_router(build_tasks_router(task_service), prefix="/api")
-    app.include_router(build_runs_router(run_service, runtime.execution_image), prefix="/api")
+    app.include_router(build_runs_router(run_service, delivery_service, runtime.execution_image), prefix="/api")
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

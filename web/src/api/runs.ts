@@ -29,6 +29,14 @@ export interface RunEvent {
   payload: Record<string, unknown>
   created_at: string
 }
+export interface RunDelivery {
+  status: 'completed'
+  branch: string
+  commit_sha: string
+  branch_url: string
+  compare_url: string
+  created_at: string
+}
 export interface RunDetail extends RunSummary {
   image: string
   image_id: string | null
@@ -38,6 +46,7 @@ export interface RunDetail extends RunSummary {
   patch: string
   checks: RunCheck[]
   events: RunEvent[]
+  delivery: RunDelivery | null
 }
 const runsPath = (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/runs`
 export function listRuns(taskId: string, signal: AbortSignal): Promise<RunSummary[]> {
@@ -51,4 +60,7 @@ export function createRun(taskId: string, payload: CreateRunRequest, signal: Abo
 }
 export function cancelRun(taskId: string, runId: string, signal: AbortSignal): Promise<RunDetail> {
   return request(`${runsPath(taskId)}/${encodeURIComponent(runId)}/cancel`, { method: 'POST', signal })
+}
+export function createDelivery(taskId: string, runId: string, signal: AbortSignal): Promise<RunDelivery> {
+  return request(`${runsPath(taskId)}/${encodeURIComponent(runId)}/delivery`, { method: 'POST', body: '{}', signal })
 }

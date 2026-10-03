@@ -16,9 +16,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_runs import approved_task, request
 from test_tasks import database as database
 from test_tasks import ready
-from test_workspace import TOKEN, command, real_docker, source, source_archive, source_transport
+from test_workspace import TOKEN, command, real_docker, source
 
+from repopilot.domain.settings import ensure_ssh_pair
 from repopilot.domain.tasks import TaskError
+from repopilot.execution import workspace as workspace_module
 from repopilot.execution.engine import ExecutionEngine, ExecutionResult
 from repopilot.execution.workspace import Workspace, WorkspaceError
 from repopilot.persistence.database import Database, GitHubSettingsRow, ModelSettingsRow, TaskRow
@@ -40,6 +42,9 @@ async def repositories(database):
         model.model = 'worker-fixture'
         model.api_key = 'worker-model-secret'
         github = await session.get(GitHubSettingsRow, 1)
+        public_key, private_key = ensure_ssh_pair('', '')
+        github.public_key = public_key
+        github.private_key_ciphertext = Fernet(key).encrypt(private_key.encode()).decode()
         github.api_token_ciphertext = Fernet(key).encrypt(TOKEN.encode()).decode()
     return SettingsRepository(database), GitHubSettingsRepository(database, SecretStr(key.decode()))
 
@@ -70,9 +75,11 @@ class ControlledEngine:
         self.calls = []
         self.cleanups = []
         self.effects = []
+        self.git_auth_strategies = []
         self.waiting = asyncio.Queue()
 
-    async def run(self, *, run_id, source, goal, model, github_token, image, emit):
+    async def run(self, *, run_id, source, goal, model, github_credentials, git_auth_strategy, image, emit):
+        self.git_auth_strategies.append(git_auth_strategy)
         self.calls.append(run_id)
         self.started.put_nowait(run_id)
         self.entered.set()
@@ -290,12 +297,23 @@ async def test_lost_advisory_connection_cancels_and_cleans_without_new_claim(dat
 
 
 class DockerSleepEngine:
-    """Actual Workspace/Docker, controlled source HTTP only; no model is needed to sleep."""
+    """Actual Workspace/Docker; no model is needed to exercise cancellation."""
 
-    async def run(self, *, run_id, source, goal, model, github_token, image, emit):
-        workspace = Workspace(run_id, source_transport=source_transport(source_archive()))
+    async def run(self, *, run_id, source, goal, model, github_credentials, git_auth_strategy,
+                  image, emit):
+        workspace = Workspace(run_id)
+        original_clone = workspace_module.clone_fixed_commit
+        async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
+            destination.mkdir()
+            (destination / '.git').mkdir()
+            (destination / '.git/config').write_text('[core]\nrepositoryformatversion = 0\n')
+            (destination / 'fixture.txt').write_text('worker fixture\n')
+        workspace_module.clone_fixed_commit = clone_fixture
         try:
-            image_id = await workspace.prepare(source=source, github_token=github_token, image=image)
+            image_id = await workspace.prepare(
+                source=source, github_credentials=github_credentials,
+                git_auth_strategy=git_auth_strategy, image=image,
+            )
             await emit('state', {'image_id': image_id})
             await emit('state', {
                 'status': 'environment_ready', 'setup_command': '', 'check_command': 'true',
@@ -304,6 +322,7 @@ class DockerSleepEngine:
             await workspace.shell('sleep 50 & wait')
             return ExecutionResult('completed', 'Sleep finished', '', [])
         finally:
+            workspace_module.clone_fixed_commit = original_clone
             await workspace.cleanup()
 
     async def cleanup(self, run_id):
@@ -449,6 +468,7 @@ async def test_configured_keyless_model_executes_and_completes(database, reposit
         engine.release.put_nowait(None)
         completed = await eventually(lambda: RunRepository(database).detail(task.id, run.id), lambda value: value.status == 'completed')
         assert completed.report == 'External check passed'
+        assert engine.git_auth_strategies == ['ssh_key']
         assert engine.cleanups == [run.id]
         stop.set()
         await asyncio.wait_for(job, 5)

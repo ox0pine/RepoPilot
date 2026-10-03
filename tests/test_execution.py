@@ -9,24 +9,16 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from test_workspace import (
-    TOKEN as GITHUB_TOKEN,
-)
-from test_workspace import (
-    command,
-    real_docker,
-    source,
-    source_archive,
-    source_transport,
-)
-from test_workspace import (
-    docker_workspace as docker_workspace,
-)
+from test_workspace import TOKEN as GITHUB_TOKEN
+from test_workspace import command, real_docker, source
+from test_workspace import docker_workspace as docker_workspace
 
 from repopilot.domain.tasks import GoalContent
 from repopilot.execution import container_helper
 from repopilot.execution import engine as engine_module
+from repopilot.execution import workspace as workspace_module
 from repopilot.execution.engine import ExecutionEngine
+from repopilot.execution.git import GitHubGitCredentials
 from repopilot.execution.model import ModelClient, ModelError
 from repopilot.execution.tools import ToolDispatcher, validate_batch
 from repopilot.execution.workspace import CommandResult, ToolError, WorkspaceError
@@ -91,7 +83,7 @@ class WorkspaceFixture:
     setup_code = 0
     patch = 'diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-def add(a, b): return a - b\n+def add(a, b): return a + b\n'
 
-    def __init__(self, run_id, *, source_transport=None):
+    def __init__(self, run_id):
         self.run_id = run_id
         self.prepared = False
         self.image_id = None
@@ -101,7 +93,7 @@ class WorkspaceFixture:
         self.capture_count = 0
         self.instances.append(self)
 
-    async def prepare(self, source, github_token, image):
+    async def prepare(self, source, github_credentials, git_auth_strategy, image):
         self.prepared = True
         self.image_id = 'sha256:fixture-image'
         return self.image_id
@@ -146,8 +138,9 @@ async def run_engine(provider, emit=None, **overrides):
     async def record(kind, payload):
         events.append((kind, payload))
     parameters = dict(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local', emit=emit or record,
+        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
+        git_auth_strategy='https_token', image='repopilot-dev:local', emit=emit or record,
     )
     parameters.update(overrides)
     result = await ExecutionEngine(model_transport=provider.transport).run(**parameters)
@@ -288,9 +281,9 @@ async def test_wall_clock_budget_stops_waiting_model_and_cleans_up(workspace_fix
         return reply(call())
     monkeypatch.setattr(engine_module, 'MAX_RUN_SECONDS', 0.01)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(waiting_response)).run(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local',
-        emit=_discard,
+        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
+        git_auth_strategy='https_token', image='repopilot-dev:local', emit=_discard,
     )
     assert result.status == 'exhausted'
     assert workspace_fixture.instances[-1].actions == []
@@ -365,8 +358,9 @@ async def test_unknown_network_result_is_not_retried(workspace_fixture):
         requests.append(request)
         raise httpx.ReadError('Connection lost after submission', request=request)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(disconnected)).run(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local', emit=_discard,
+        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
+        git_auth_strategy='https_token', image='repopilot-dev:local', emit=_discard,
     )
     assert result.status == 'failed'
     assert '未自动重试' in result.report
@@ -437,7 +431,7 @@ async def test_actual_docker_rejects_stale_sha_after_shell_and_keeps_new_content
 
 
 @real_docker
-async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_removes_container(tmp_path):
+async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_removes_container(tmp_path, monkeypatch):
     assert shutil.which('docker'), 'Docker coverage enabled but Docker CLI is unavailable'
     code, output = await command('docker', 'info', '--format', '{{.ServerVersion}}')
     assert code == 0, f'Docker coverage enabled but Docker daemon is unavailable: {output}'
@@ -451,22 +445,29 @@ async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_re
         })),
         reply(content='Repaired addition; review the patch'),
     ])
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    (upstream / 'calc.py').write_bytes(original)
+    (upstream / 'pyproject.toml').write_bytes(b'[project]\nname="calc-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n')
+    (upstream / 'test_calc.py').write_bytes(b'import unittest\nfrom calc import add\nclass TestAdd(unittest.TestCase):\n def test_add(self): self.assertEqual(add(2, 3), 5)\n')
+    assert (await command('git', 'init', '--quiet', cwd=upstream))[0] == 0
+    assert (await command('git', 'add', '.', cwd=upstream))[0] == 0
+    assert (await command('git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                          'commit', '--quiet', '-m', 'fixture', cwd=upstream))[0] == 0
+    async def local_clone(repository_url, commit, destination, credentials, *, strategy, timeout=90):
+        shutil.copytree(upstream, destination)
+    monkeypatch.setattr(workspace_module, 'clone_fixed_commit', local_clone)
     events = []
     async def emit(kind, payload):
         events.append((kind, payload))
     run_id = uuid4()
-    engine = ExecutionEngine(
-        source_transport=source_transport(source_archive({
-            'calc.py': original,
-            'pyproject.toml': b'[project]\nname="calc-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n',
-            'test_calc.py': b'import unittest\nfrom calc import add\nclass TestAdd(unittest.TestCase):\n def test_add(self): self.assertEqual(add(2, 3), 5)\n',
-        })), model_transport=provider.transport,
-    )
+    engine = ExecutionEngine(model_transport=provider.transport)
     try:
         result = await engine.run(
-            run_id=run_id, source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-            image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'),
-            emit=emit,
+            run_id=run_id, source=source(), goal=GOAL, model=settings(),
+            github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
+            git_auth_strategy='https_token',
+            image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'), emit=emit,
         )
         assert result.status == 'completed', result.report
         assert [(check.phase, check.exit_code) for check in result.checks] == [('setup', 0), ('baseline', 1), ('final', 0)]

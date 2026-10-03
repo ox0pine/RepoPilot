@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import { ApiError } from '../api/client'
-import { cancelRun, createRun, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
+import { cancelRun, createDelivery, createRun, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
 import { sessionToken, sessionVersion } from '../stores/session'
 
 const props = defineProps<{ taskId: string; revision: number; goalVersion: number; approved: boolean }>()
@@ -13,7 +13,7 @@ const detail = ref<RunDetail | null>(null)
 const readError = ref('')
 const actionError = ref('')
 const loading = ref(false)
-const busy = ref<'start' | 'cancel' | null>(null)
+const busy = ref<'start' | 'cancel' | 'delivery' | null>(null)
 const known = ref(false)
 const uncertain = ref(false)
 let epoch = 0
@@ -142,6 +142,30 @@ async function mutate(action: 'start' | 'cancel'): Promise<void> {
     if (ctx.current()) { busy.value = null; schedule() }
   }
 }
+async function deliver(): Promise<void> {
+  if (busy.value || !detail.value || detail.value.status !== 'completed' || !detail.value.patch || detail.value.delivery) return
+  const ctx = context()
+  const runId = detail.value.id
+  busy.value = 'delivery'
+  actionError.value = ''
+  sequence++; detailSequence++
+  try {
+    const delivery = await createDelivery(ctx.id, runId, ctx.controller.signal)
+    if (!ctx.current() || detail.value?.id !== runId) return
+    detail.value = { ...detail.value, delivery }
+  } catch (error) {
+    if (!ctx.current()) return
+    const unknown = !(error instanceof ApiError) || error.status >= 500 || error.status < 400
+    actionError.value = unknown
+      ? '分支提交结果未确认，请重新读取后再显式提交；系统会核对同一分支，不会覆盖。'
+      : message(error)
+    uncertain.value = unknown
+    await refresh()
+  } finally {
+    controllers.delete(ctx.controller)
+    if (ctx.current()) busy.value = null
+  }
+}
 function download(extension: 'patch' | 'json'): void {
   if (!detail.value) return
   const body = extension === 'patch' ? detail.value.patch : JSON.stringify(detail.value, null, 2)
@@ -208,6 +232,15 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
       <h4>报告</h4><pre>{{ detail.report || '尚无报告。' }}</pre>
       <h4>Patch / Diff</h4><pre class="patch">{{ detail.patch || '尚无已保存 Patch；是否无变更请以报告为准。' }}</pre>
       <div class="actions"><NButton :disabled="!detail.patch" @click="download('patch')">下载 .patch</NButton><NButton @click="download('json')">下载 .json 报告</NButton></div>
+      <section class="delivery-panel" aria-label="修复分支交付">
+        <h4>修复分支交付</h4>
+        <p class="muted">批准 Goal 和 Run 完成都不会自动发布。仅点击下方按钮才会从该 Run 的固定基线验证非空 Patch，以 RepoPilot 身份提交到自己仓库的唯一分支；默认分支不会被覆盖，系统也不会自动创建 PR、批准或合并。</p>
+        <template v-if="detail.delivery">
+          <dl><dt>分支</dt><dd><a :href="detail.delivery.branch_url" target="_blank" rel="noopener noreferrer">{{ detail.delivery.branch }}</a></dd><dt>Commit</dt><dd>{{ detail.delivery.commit_sha }}</dd></dl>
+          <NButton tag="a" :href="detail.delivery.compare_url" target="_blank" rel="noopener noreferrer" type="primary">在 GitHub 查看 / 合并</NButton>
+        </template>
+        <div v-else class="actions"><NButton type="primary" :disabled="detail.status !== 'completed' || !detail.patch || !!busy" :loading="busy === 'delivery'" @click="deliver">提交修复分支</NButton><span class="muted">需要已保存 GitHub token 的 Contents 写权限；合并必须在 GitHub 网页端由人工完成。</span></div>
+      </section>
     </article>
   </section>
 </template>
