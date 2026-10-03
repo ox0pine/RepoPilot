@@ -48,7 +48,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         TaskRepository(database), model_repository, github_repository,
         GitHubSourceClient(), GoalClient(),
     )
-    run_service = RunService(RunRepository(database))
+    run_service = RunService(RunRepository(database, default_image=runtime.execution_image))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -4,9 +4,6 @@ export type RunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'blocked
 export interface CreateRunRequest {
   expected_revision: number
   goal_version: number
-  image: string
-  setup_command: string
-  check_command: string
 }
 export interface RunSummary {
   id: string
@@ -43,9 +40,6 @@ export interface RunDetail extends RunSummary {
   events: RunEvent[]
 }
 const runsPath = (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/runs`
-export function getExecution(signal: AbortSignal): Promise<{ default_image: string }> {
-  return request('/api/execution', { signal })
-}
 export function listRuns(taskId: string, signal: AbortSignal): Promise<RunSummary[]> {
   return request(runsPath(taskId), { signal })
 }

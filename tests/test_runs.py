@@ -19,9 +19,7 @@ from repopilot.persistence.tasks import TaskRepository
 
 
 def request(task, **changes):
-    values = dict(expected_revision=task.revision, goal_version=task.current_goal_version,
-                  image='repopilot-dev:local', setup_command='',
-                  check_command="python -c 'assert 2 + 3 == 5'")
+    values = dict(expected_revision=task.revision, goal_version=task.current_goal_version)
     values.update(changes)
     return CreateRunRequest(**values)
 
@@ -35,18 +33,20 @@ async def approved_task(database, number=1):
 @pytest.mark.parametrize('changes', [
     {'expected_revision': 0}, {'expected_revision': True},
     {'goal_version': 0}, {'goal_version': True}, {'goal_version': '1'},
-    {'image': ''}, {'image': ' '}, {'image': 'x' * 257},
-    {'check_command': ''}, {'check_command': ' '}, {'check_command': 'x' * 4001},
-    {'setup_command': 'x' * 4001}, {'setup_command': 'echo\0secret'},
-    {'check_command': 'echo\0secret'},
+    {'image': 'repopilot-dev:local'}, {'setup_command': ''}, {'check_command': 'python -m pytest'},
     {'host_path': '/tmp'}, {'environment': {'TOKEN': 'secret'}}, {'docker_args': ['--privileged']},
 ])
 def test_run_request_rejects_invalid_or_privileged_input(changes):
-    payload = dict(expected_revision=1, goal_version=1, image='repopilot-dev:local',
-                   check_command='python -m pytest')
+    payload = dict(expected_revision=1, goal_version=1)
     payload.update(changes)
     with pytest.raises(ValidationError):
         CreateRunRequest(**payload)
+
+
+def test_run_request_contains_only_approval_versions():
+    assert CreateRunRequest(expected_revision=1, goal_version=1).model_dump() == {
+        'expected_revision': 1, 'goal_version': 1,
+    }
 
 
 async def test_start_requires_latest_approved_goal_and_revision(database):
@@ -146,9 +146,9 @@ async def test_authenticated_run_api_and_secret_nonstorage(api_client, database)
     assert (await client.get(path + '/runs')).json() == []
     execution = await client.get('/api/execution')
     assert execution.status_code == 200
-    body = dict(expected_revision=task['revision'], goal_version=1,
-                image=execution.json()['default_image'], setup_command='echo first\necho second',
-                check_command='python -m pytest\necho finished')
+    body = dict(expected_revision=task['revision'], goal_version=1)
+    for former_input in ({'image': 'user-image:latest'}, {'setup_command': ''}, {'check_command': 'true'}):
+        assert (await client.post(path + '/runs', json=body | former_input)).status_code == 422
     count = len(calls)
     response = await client.post(path + '/runs', json=body)
     assert response.status_code == 202
@@ -156,7 +156,8 @@ async def test_authenticated_run_api_and_secret_nonstorage(api_client, database)
     run_path = path + '/runs/' + run['id']
     assert run['status'] == 'queued' and run['task_id'] == task['id']
     assert run['image_id'] is None and run['started_at'] is None and run['finished_at'] is None
-    assert run['setup_command'] == body['setup_command'] and run['check_command'] == body['check_command']
+    assert run['image'] == execution.json()['default_image']
+    assert run['setup_command'] == run['check_command'] == ''
     assert run['report'] == run['patch'] == '' and run['checks'] == []
     assert len(calls) == count
     assert (await client.post(path + '/runs', json=body)).status_code == 409
@@ -186,6 +187,45 @@ async def test_authenticated_run_api_and_secret_nonstorage(api_client, database)
         ('POST', run_path + '/cancel', None),
     ]:
         assert (await client.request(method, route, json=data)).status_code == 401
+
+
+async def test_run_uses_system_image_and_empty_initial_commands(database):
+    task = await approved_task(database)
+    runs = RunRepository(database, default_image='system-image:configured')
+    run = await runs.create(task.id, request(task))
+    assert run.image == 'system-image:configured'
+    assert run.setup_command == run.check_command == ''
+    claimed = await runs.claim()
+    assert claimed.image == run.image
+
+
+async def test_execution_commands_are_fenced_and_frozen_after_resolution(database):
+    runs = RunRepository(database)
+    task = await approved_task(database)
+    run = await runs.create(task.id, request(task))
+    assert not await runs.set_execution_commands(
+        run.id, uuid4(), setup_command='stale setup', check_command='stale check',
+    )
+    claimed = await runs.claim()
+    assert await runs.set_execution_commands(
+        run.id, claimed.worker_token, setup_command='preparing', check_command='',
+    )
+    commands = dict(setup_command='python -m pip install -r requirements.txt', check_command='python -m pytest')
+    assert await runs.set_execution_commands(run.id, claimed.worker_token, **commands)
+    assert await runs.set_execution_commands(run.id, claimed.worker_token, **commands)
+    for changes in ({'setup_command': 'different'}, {'check_command': 'different'}, {'check_command': ''}):
+        with pytest.raises(TaskError) as frozen:
+            await runs.set_execution_commands(run.id, claimed.worker_token, **(commands | changes))
+        assert frozen.value.status_code == 409
+    recovered = await runs.recover(run.id)
+    assert not await runs.set_execution_commands(
+        run.id, claimed.worker_token, setup_command='late', check_command='late',
+    )
+    assert await runs.set_execution_commands(run.id, recovered.worker_token, **commands)
+    detail = await runs.detail(task.id, run.id)
+    assert detail.setup_command == commands['setup_command'] and detail.check_command == commands['check_command']
+    await runs.finish(run.id, recovered.worker_token, status='interrupted', cleanup_confirmed=True)
+    assert not await runs.set_execution_commands(run.id, recovered.worker_token, **commands)
 
 
 @pytest.mark.parametrize('approval_change', [

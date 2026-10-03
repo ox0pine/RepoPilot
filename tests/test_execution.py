@@ -106,10 +106,13 @@ class WorkspaceFixture:
         self.image_id = 'sha256:fixture-image'
         return self.image_id
 
-    async def setup(self, command):
+    async def setup(self):
         return CommandResult(self.setup_code, 'setup evidence', False)
 
-    async def shell(self, command, timeout=60):
+    async def environment_info(self):
+        return {'projects': [], 'setup_command': 'automatic fixture preparation', 'check_command': CHECK}
+
+    async def shell(self, command, timeout=60, *, cwd='.', project=None):
         if command == CHECK:
             code = self.checks.popleft() if self.checks else 1
             return CommandResult(code, 'assertion failed' if code else 'check passed', False)
@@ -144,7 +147,7 @@ async def run_engine(provider, emit=None, **overrides):
         events.append((kind, payload))
     parameters = dict(
         run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local', setup_command='', check_command=CHECK, emit=emit or record,
+        image='repopilot-dev:local', emit=emit or record,
     )
     parameters.update(overrides)
     result = await ExecutionEngine(model_transport=provider.transport).run(**parameters)
@@ -233,7 +236,7 @@ async def test_failed_final_check_returns_evidence_and_continues_original_loop(w
     result, _ = await run_engine(provider)
     assert result.status == 'completed'
     assert [(check.phase, check.exit_code) for check in result.checks] == [
-        ('baseline', 1), ('final', 1), ('final', 0),
+        ('setup', 0), ('baseline', 1), ('final', 1), ('final', 0),
     ]
     assert workspace_fixture.instances[-1].cleaned
 
@@ -244,7 +247,7 @@ async def test_failed_final_check_cannot_reset_round_budget(workspace_fixture, m
     provider = Provider([reply(content='Finished'), reply(content='Finished again')])
     result, _ = await run_engine(provider)
     assert result.status == 'exhausted'
-    assert all(check.exit_code != 0 for check in result.checks)
+    assert [check.exit_code for check in result.checks if check.phase == 'final'] == [1, 1]
     assert len(provider.inputs) == 2
 
 
@@ -286,7 +289,7 @@ async def test_wall_clock_budget_stops_waiting_model_and_cleans_up(workspace_fix
     monkeypatch.setattr(engine_module, 'MAX_RUN_SECONDS', 0.01)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(waiting_response)).run(
         run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local', setup_command='', check_command=CHECK,
+        image='repopilot-dev:local',
         emit=_discard,
     )
     assert result.status == 'exhausted'
@@ -363,7 +366,7 @@ async def test_unknown_network_result_is_not_retried(workspace_fixture):
         raise httpx.ReadError('Connection lost after submission', request=request)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(disconnected)).run(
         run_id=uuid4(), source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
-        image='repopilot-dev:local', setup_command='', check_command=CHECK, emit=_discard,
+        image='repopilot-dev:local', emit=_discard,
     )
     assert result.status == 'failed'
     assert '未自动重试' in result.report
@@ -382,7 +385,7 @@ async def test_cleanup_failure_cannot_return_completed(workspace_fixture):
 async def test_setup_failure_blocks_before_model_and_preserves_check_evidence(workspace_fixture):
     workspace_fixture.setup_code = 7
     provider = Provider([])
-    result, _ = await run_engine(provider, setup_command='install dependencies')
+    result, _ = await run_engine(provider)
     assert result.status == 'blocked'
     assert provider.inputs == []
     assert [(check.phase, check.exit_code) for check in result.checks] == [('setup', 7)]
@@ -453,17 +456,22 @@ async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_re
         events.append((kind, payload))
     run_id = uuid4()
     engine = ExecutionEngine(
-        source_transport=source_transport(source_archive()), model_transport=provider.transport,
+        source_transport=source_transport(source_archive({
+            'calc.py': original,
+            'pyproject.toml': b'[project]\nname="calc-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n',
+            'test_calc.py': b'import unittest\nfrom calc import add\nclass TestAdd(unittest.TestCase):\n def test_add(self): self.assertEqual(add(2, 3), 5)\n',
+        })), model_transport=provider.transport,
     )
     try:
         result = await engine.run(
             run_id=run_id, source=source(), goal=GOAL, model=settings(), github_token=GITHUB_TOKEN,
             image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'),
-            setup_command='', check_command=CHECK, emit=emit,
+            emit=emit,
         )
         assert result.status == 'completed', result.report
-        assert [(check.phase, check.exit_code) for check in result.checks] == [('baseline', 1), ('final', 0)]
-        assert all(check.command == CHECK for check in result.checks)
+        assert [(check.phase, check.exit_code) for check in result.checks] == [('setup', 0), ('baseline', 1), ('final', 0)]
+        assert result.checks[1].command == result.checks[2].command
+        assert 'unittest' in result.checks[1].command
         patch_file = tmp_path / 'result.patch'
         patch_file.write_text(result.patch)
         fresh = tmp_path / 'fresh'
@@ -547,7 +555,7 @@ async def test_cumulative_input_budget_stops_before_second_model_submission(work
 
 async def test_reasoning_and_tool_output_secrets_never_enter_next_model_turn(workspace_fixture):
     original_shell = workspace_fixture.shell
-    async def shell_with_secrets(self, command, timeout=60):
+    async def shell_with_secrets(self, command, timeout=60, *, cwd='.', project=None):
         if command == CHECK:
             return await original_shell(self, command, timeout)
         return CommandResult(0, f'Visible tool output {MODEL_TOKEN} {GITHUB_TOKEN}', False)

@@ -70,16 +70,25 @@ class ControlledEngine:
         self.calls = []
         self.cleanups = []
         self.effects = []
+        self.waiting = asyncio.Queue()
 
-    async def run(self, **parameters):
-        run_id = parameters['run_id']
+    async def run(self, *, run_id, source, goal, model, github_token, image, emit):
         self.calls.append(run_id)
         self.started.put_nowait(run_id)
         self.entered.set()
         try:
+            await emit('state', {
+                'status': 'environment_ready', 'setup_command': 'automatic dependency setup',
+                'check_command': 'python -m pytest',
+            })
+            await emit('check', {
+                'phase': 'baseline', 'command': 'python -m pytest',
+                'exit_code': 0, 'output': 'Baseline passed',
+            })
             if self.emit_event:
-                await parameters['emit']('tool_start', {'call_id': 'effect-1', 'name': 'shell'})
+                await emit('tool_start', {'call_id': 'effect-1', 'name': 'shell'})
                 self.effects.append(run_id)
+            self.waiting.put_nowait(run_id)
             await self.release.get()
             return ExecutionResult('completed', 'External check passed', '', [])
         except asyncio.CancelledError:
@@ -133,6 +142,7 @@ async def test_fifo_is_strictly_sequential_without_external_wait_row_locks(datab
     async with running_worker(database, repositories, engine) as (stop, job):
         assert await asyncio.wait_for(engine.started.get(), 5) == first[1].id
         assert (await runs.detail(second[0].id, second[1].id)).status == 'queued'
+        assert await asyncio.wait_for(engine.waiting.get(), 5) == first[1].id
         # NOWAIT proves both ownership rows are released during the external wait.
         async with database.session() as session, session.begin():
             await session.execute(select(TaskRow).where(TaskRow.id == first[0].id).with_for_update(nowait=True))
@@ -209,11 +219,12 @@ async def test_startup_recovery_fences_old_owner_without_tool_replay(database, r
     assert engine.calls == [] and engine.cleanups == [run.id]
 
 
-@pytest.mark.parametrize('failure', ['event', 'cancel_read', 'finish'])
+@pytest.mark.parametrize('failure', ['commands', 'event', 'cancel_read', 'finish'])
 async def test_database_failure_stops_effects_and_preserves_recoverable_run(database, repositories, monkeypatch, failure):
     first, second = await enqueue(database, 1), await enqueue(database, 2)
     engine = ControlledEngine(emit_event=failure == 'event')
-    method = {'event': 'append_event', 'cancel_read': 'cancellation_requested', 'finish': 'finish'}[failure]
+    method = {'commands': 'set_execution_commands', 'event': 'append_event',
+              'cancel_read': 'cancellation_requested', 'finish': 'finish'}[failure]
     async def unavailable(*args, **kwargs):
         if failure == 'cancel_read':
             await engine.entered.wait()
@@ -229,6 +240,33 @@ async def test_database_failure_stops_effects_and_preserves_recoverable_run(data
     assert (await runs.detail(second[0].id, second[1].id)).status == 'queued'
     assert engine.calls == [first[1].id] and first[1].id in engine.cleanups
     assert engine.effects == []
+
+
+async def test_automatic_commands_are_saved_before_baseline(database, repositories, monkeypatch):
+    task, run = await enqueue(database)
+    engine = ControlledEngine()
+    append = RunRepository.append_event
+    baseline_saved = asyncio.Event()
+
+    async def inspect(self, run_id, worker_token, kind, payload, **kwargs):
+        if kind == 'check' and payload.get('phase') == 'baseline':
+            detail = await self.detail(task.id, run_id)
+            assert detail.setup_command == 'automatic dependency setup'
+            assert detail.check_command == payload['command'] == 'python -m pytest'
+            baseline_saved.set()
+        return await append(self, run_id, worker_token, kind, payload, **kwargs)
+
+    monkeypatch.setattr(RunRepository, 'append_event', inspect)
+    async with running_worker(database, repositories, engine) as (stop, job):
+        await asyncio.wait_for(baseline_saved.wait(), 5)
+        engine.release.put_nowait(None)
+        detail = await eventually(lambda: RunRepository(database).detail(task.id, run.id),
+                                  lambda value: value.status == 'completed')
+        assert detail.setup_command == 'automatic dependency setup'
+        assert detail.check_command == 'python -m pytest'
+        assert detail.checks[0].phase == 'baseline'
+        stop.set()
+        await asyncio.wait_for(job, 5)
 
 
 async def test_lost_advisory_connection_cancels_and_cleans_without_new_claim(database, repositories):
@@ -254,12 +292,15 @@ async def test_lost_advisory_connection_cancels_and_cleans_without_new_claim(dat
 class DockerSleepEngine:
     """Actual Workspace/Docker, controlled source HTTP only; no model is needed to sleep."""
 
-    async def run(self, **parameters):
-        workspace = Workspace(parameters['run_id'], source_transport=source_transport(source_archive()))
+    async def run(self, *, run_id, source, goal, model, github_token, image, emit):
+        workspace = Workspace(run_id, source_transport=source_transport(source_archive()))
         try:
-            image_id = await workspace.prepare(source=parameters['source'], github_token=parameters['github_token'], image=parameters['image'])
-            await parameters['emit']('state', {'image_id': image_id})
-            await parameters['emit']('tool_start', {'call_id': 'sleep-real', 'name': 'shell'})
+            image_id = await workspace.prepare(source=source, github_token=github_token, image=image)
+            await emit('state', {'image_id': image_id})
+            await emit('state', {
+                'status': 'environment_ready', 'setup_command': '', 'check_command': 'true',
+            })
+            await emit('tool_start', {'call_id': 'sleep-real', 'name': 'shell'})
             await workspace.shell('sleep 50 & wait')
             return ExecutionResult('completed', 'Sleep finished', '', [])
         finally:

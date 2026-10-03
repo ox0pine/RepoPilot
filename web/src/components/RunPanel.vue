@@ -1,20 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NInput } from 'naive-ui'
+import { NButton } from 'naive-ui'
 import { ApiError } from '../api/client'
-import { cancelRun, createRun, getExecution, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
+import { cancelRun, createRun, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
 import { sessionToken, sessionVersion } from '../stores/session'
 
 const props = defineProps<{ taskId: string; revision: number; goalVersion: number; approved: boolean }>()
 const emit = defineEmits<{ changed: []; active: [value: boolean] }>()
-const image = ref('')
-const setup = ref('')
-const check = ref('')
 const runs = ref<RunSummary[]>([])
 const selectedId = ref('')
 const detail = ref<RunDetail | null>(null)
 const readError = ref('')
-const configError = ref('')
 const actionError = ref('')
 const loading = ref(false)
 const busy = ref<'start' | 'cancel' | null>(null)
@@ -29,8 +25,24 @@ const activeStatus = (status: RunStatus) => status === 'queued' || status === 'r
 const activeRun = computed(() => runs.value.find(run => activeStatus(run.status)))
 const guarded = computed(() => !known.value || !!activeRun.value || uncertain.value || !!readError.value || !!busy.value)
 const labels: Record<RunStatus, string> = { queued: '排队中', running: '执行中', completed: '检查通过，待人工审阅', failed: '执行失败', blocked: '执行受阻', exhausted: '预算已耗尽', cancelled: '已取消', interrupted: '执行已中断' }
-const valid = computed(() => !!image.value.trim() && image.value.length <= 256 && !!check.value.trim() && check.value.length <= 4000 && setup.value.length <= 4000 && ![image.value, setup.value, check.value].some(value => value.includes('\0')))
-const canStart = computed(() => props.approved && !guarded.value && !busy.value && valid.value)
+const canStart = computed(() => props.approved && !guarded.value)
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+const environment = computed(() => {
+  const events = detail.value?.events ?? []
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!
+    if (event.kind !== 'context') continue
+    const value = event.payload.environment
+    return isRecord(value) ? value : null
+  }
+  return null
+})
+const environmentProjects = computed(() => {
+  const projects = environment.value?.projects
+  return Array.isArray(projects) ? projects.filter(isRecord) : []
+})
 function message(error: unknown): string { return error instanceof Error ? error.message : '请求失败' }
 function date(value: string): string { return new Date(value).toLocaleString('zh-CN') }
 function stop(): void { if (timer !== undefined) clearTimeout(timer); timer = undefined }
@@ -91,18 +103,6 @@ async function refresh(): Promise<void> {
     if (ctx.current() && order === sequence) { loading.value = false; schedule() }
   }
 }
-async function loadConfig(): Promise<void> {
-  const ctx = context()
-  const original = image.value
-  try {
-    const value = await getExecution(ctx.controller.signal)
-    if (ctx.current()) {
-      configError.value = ''
-      if (!original && image.value === original) image.value = value.default_image
-    }
-  } catch (error) { if (ctx.current()) configError.value = message(error) }
-  finally { controllers.delete(ctx.controller) }
-}
 async function select(id: string): Promise<void> {
   if (selectedId.value === id) return
   selectedId.value = id
@@ -120,7 +120,7 @@ async function mutate(action: 'start' | 'cancel'): Promise<void> {
   actionError.value = ''
   try {
     const value = action === 'start'
-      ? await createRun(ctx.id, { expected_revision: props.revision, goal_version: props.goalVersion, image: image.value, setup_command: setup.value, check_command: check.value }, ctx.controller.signal)
+      ? await createRun(ctx.id, { expected_revision: props.revision, goal_version: props.goalVersion }, ctx.controller.signal)
       : await cancelRun(ctx.id, cancelId!, ctx.controller.signal)
     if (!ctx.current()) return
     if (action === 'start') selectedId.value = value.id
@@ -132,7 +132,7 @@ async function mutate(action: 'start' | 'cancel'): Promise<void> {
     if (!ctx.current()) return
     const conflict = error instanceof ApiError && error.status === 409
     const unknown = !(error instanceof ApiError) || error.status >= 500 || error.status < 400
-    actionError.value = conflict ? '状态已更新，请重新读取并人工确认后再提交。输入已保留。' : unknown ? '提交结果未确认，请重新读取。不会自动重发。' : message(error)
+    actionError.value = conflict ? '状态已更新，请重新读取并人工确认后再开始。不会自动重新提交。' : unknown ? '提交结果未确认，请重新读取。不会自动重发。' : message(error)
     uncertain.value = unknown
     emit('changed')
     // Only read to reconcile; never retry a POST automatically.
@@ -155,9 +155,8 @@ watch(guarded, value => emit('active', value), { immediate: true, flush: 'sync' 
 watch(() => [props.taskId, sessionVersion()] as const, () => {
   reset()
   runs.value = []; detail.value = null; selectedId.value = ''; known.value = false
-  readError.value = ''; configError.value = ''; actionError.value = ''; uncertain.value = false; busy.value = null
-  image.value = ''; setup.value = ''; check.value = ''
-  void loadConfig(); void refresh()
+  readError.value = ''; actionError.value = ''; uncertain.value = false; busy.value = null
+  void refresh()
 }, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => { reset(); emit('active', false) })
 </script>
@@ -166,17 +165,9 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
   <section class="run-panel" aria-labelledby="run-heading">
     <h2 id="run-heading">执行与成果审阅</h2>
     <p>批准不会自动执行，请单独开始执行。本次从固定 commit 重新开始，不继承上次修改；结果仍需人工审阅。</p>
-    <div v-if="configError" class="notice" role="alert">默认镜像读取失败：{{ configError }} <NButton size="small" @click="loadConfig">重新读取默认值</NButton>（也可手动填写镜像）</div>
-    <form class="run-form" @submit.prevent="mutate('start')">
-      <label for="run-image">执行镜像</label>
-      <NInput v-model:value="image" :disabled="!!busy" :input-props="{ id: 'run-image', maxlength: 256 }" placeholder="请先准备 Docker 执行镜像" />
-      <label for="run-setup">准备命令（可空）</label>
-      <NInput v-model:value="setup" type="textarea" :disabled="!!busy" :autosize="{ minRows: 2, maxRows: 8 }" :input-props="{ id: 'run-setup', maxlength: 4000, 'aria-describedby': 'setup-risk' }" placeholder="例如安装项目依赖" />
-      <p id="setup-risk" class="muted">准备阶段允许联网，并可能执行第三方依赖安装脚本。这是可信用户选择的动作，不保证防御任意网络攻击。更高隔离需求请使用预装镜像并留空准备命令；不注入宿主凭据。</p>
-      <label for="run-check">检查命令（必填）</label>
-      <NInput v-model:value="check" type="textarea" :disabled="!!busy" :autosize="{ minRows: 2, maxRows: 8 }" :input-props="{ id: 'run-check', maxlength: 4000 }" placeholder="例如 python -m pytest" />
-      <div class="actions"><NButton attr-type="submit" type="primary" :disabled="!canStart" :loading="busy === 'start'">开始执行</NButton><span class="muted">{{ !approved ? '请先批准最新 Goal' : guarded ? '正在执行或状态尚未确认，请先等待或重新读取' : '检查通过仅表示命令退出 0，不代表独立验收' }}</span></div>
-    </form>
+    <p>开始后，系统自动选择执行镜像与检查命令，配置 Python pyproject/.venv、Node 依赖与 LSP，无需填写任何命令。</p>
+    <p class="muted">准备阶段可能在沙箱内联网下载依赖并运行安装脚本；准备完成后断开网络，不注入宿主凭据。</p>
+    <div class="actions"><NButton type="primary" :disabled="!canStart" :loading="busy === 'start'" @click="mutate('start')">开始执行</NButton><span class="muted">{{ !approved ? '请先批准最新 Goal' : guarded ? '正在执行或状态尚未确认，请先等待或重新读取' : '检查通过仅表示命令退出 0，不代表独立验收' }}</span></div>
     <div v-if="actionError" class="notice" role="alert">{{ actionError }}</div>
     <div v-if="readError" class="notice" role="alert">执行记录读取失败：{{ readError }}。保留已读内容；请显式重新读取，状态以后端为准。</div>
     <div class="actions"><h3>执行历史（最新 50 条）</h3><NButton size="small" :disabled="!!busy" :loading="loading" @click="refresh">重新读取</NButton></div>
@@ -187,7 +178,29 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
       <p class="muted">切换页面或退出不会取消执行。取消后等待后端确认容器停止与清理成功。</p>
       <dl><dt>Run</dt><dd>{{ detail.id }}</dd><dt>Goal</dt><dd>v{{ detail.goal_version }}</dd><dt>镜像 / ID</dt><dd>{{ detail.image }} / {{ detail.image_id || '尚未解析' }}</dd><dt>开始 / 结束</dt><dd>{{ detail.started_at ? date(detail.started_at) : '尚未开始' }} / {{ detail.finished_at ? date(detail.finished_at) : '尚未结束' }}</dd></dl>
       <p v-if="detail.error" class="notice" role="alert">{{ detail.error }}</p>
-      <details><summary>本次准备与检查命令</summary><h4>准备命令</h4><pre>{{ detail.setup_command || '（空）' }}</pre><h4>检查命令</h4><pre>{{ detail.check_command }}</pre></details>
+      <section class="environment-panel" aria-label="自动配置的环境与 LSP">
+        <h4>环境与 LSP（只读）</h4>
+        <p class="muted">最近一次上下文记录中的实际环境：项目根目录、语言、解释器 / 工具链版本、准备状态与语言服务器。</p>
+        <template v-if="environment">
+          <p>环境状态：{{ environment.ready === true ? '已准备' : environment.ready === false ? '未就绪' : '尚未确认' }}</p>
+          <section v-for="(project, index) in environmentProjects" :key="index" class="check-record">
+            <h4>{{ project.root || '.' }} · {{ project.language || '尚未识别语言' }}</h4>
+            <dl>
+              <dt>状态</dt><dd>{{ project.ready === true ? '已准备' : project.ready === false ? '未就绪' : '尚未确认' }}</dd>
+              <dt>解释器</dt><dd>{{ project.interpreter || '不适用 / 尚未解析' }}</dd>
+              <dt>Python / Node 版本</dt><dd>{{ project.python_version || '—' }} / {{ project.node_version || '—' }}</dd>
+              <dt>包管理器</dt><dd>{{ project.package_manager || '—' }}</dd>
+              <dt>TypeScript SDK</dt><dd>{{ project.typescript_sdk || '—' }}</dd>
+            </dl>
+            <p v-if="project.blocked_reason" class="notice">{{ project.blocked_reason }}</p>
+            <h4>语言服务器</h4><pre>{{ JSON.stringify(project.servers ?? project.server_argv ?? {}, null, 2) }}</pre>
+          </section>
+          <details><summary>完整环境记录（只读）</summary><pre>{{ JSON.stringify(environment, null, 2) }}</pre></details>
+        </template>
+        <p v-else class="muted">尚无环境记录；请等待系统自动准备。</p>
+        <h4>实际检查命令</h4><pre>{{ detail.check_command || '尚未自动选择' }}</pre>
+      </section>
+      <details><summary>实际准备命令（只读）</summary><pre>{{ detail.setup_command || '尚无准备命令记录' }}</pre></details>
       <h4>实际检查记录</h4>
       <p v-if="!detail.checks.length" class="muted">尚无检查记录。</p>
       <section v-for="(entry, index) in detail.checks" :key="index" class="check-record"><strong>{{ entry.phase }} · 退出码 {{ entry.exit_code === null ? '未获得' : entry.exit_code }}</strong><pre>{{ entry.command }}</pre><pre>{{ entry.output || '（无输出）' }}</pre><p v-if="entry.truncated" class="notice">输出已截断</p></section>
@@ -203,7 +216,6 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
 .run-panel { min-width: 0; padding: 20px; border: 1px solid var(--border); border-radius: 12px; margin: 24px 0; background: var(--surface); overflow-wrap: anywhere; }
 h2 { margin: 0 0 12px; font-size: 19px; } h3 { margin: 0; font-size: 15px; } h4 { margin: 18px 0 8px; font-size: 14px; }
 p { line-height: 1.7; } .muted { color: var(--text-muted); font-size: 12px; }
-.run-form { display: grid; gap: 10px; margin: 20px 0; } label { font-size: 13px; font-weight: 600; } .run-form p { margin: 0; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
 .notice { padding: 12px; margin: 12px 0; background: var(--warning-bg); color: var(--warning-text); border-radius: 8px; white-space: pre-wrap; }
 .run-list { list-style: none; padding: 0; display: grid; gap: 8px; }.run-list button { width: 100%; text-align: left; padding: 12px; font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-secondary); cursor: pointer; overflow-wrap: anywhere; }

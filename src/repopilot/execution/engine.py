@@ -17,7 +17,7 @@ from repopilot.persistence.settings import StoredModelSettings
 
 MAX_ROUNDS = 24
 MAX_RUN_SECONDS = 900
-MAX_INPUT_BYTES = 256 * 1024
+MAX_INPUT_BYTES = 2 * 1024 * 1024
 MAX_EVENTS = 255
 MAX_EVENT_BYTES = 32 * 1024
 MAX_REPORT_BYTES = 64 * 1024
@@ -29,9 +29,13 @@ Apply applicable repository AGENTS.md conventions from root to leaf; inspect the
 Use only the provided tools, working directory /workspace. Never claim to have read files not actually supplied or read.
 Do not expand scope, leak secrets, install unrelated dependencies, or treat successful checks as independent human acceptance.
 Use read_file before edit_file and its exact whole-file sha256; errors are evidence, not successful actions.
-The fixed check command will run whenever you propose completion. A failed final check returns to this SAME loop and budget.
+Project Python/Node environments and language servers are configured automatically. Use semantic tools for definitions, references, diagnostics and cross-file changes.
+LSP positions use 1-based lines and Unicode character columns. unsupported/not_ready/error are not evidence of no references or a clean diagnostic result.
+Rename, code actions and formatting return opaque edit plans; apply_workspace_edit checks every file version before changing files. Never invent a plan or action ID.
+Shell closes language-server sessions for safe process cleanup; subsequent semantic tools resynchronize current disk contents.
+The system-selected check command is fixed for this run and executes whenever you propose completion. Failed final checks return to this SAME loop and budget.
 Your visible final response must summarize actual changes, checks, limitations and remaining risks, not hidden reasoning.
-You have at most 24 model rounds, 900 seconds and 256KiB cumulative model input. Preserve the complete approved goal.
+You have at most 24 model rounds, 900 seconds and 2MiB cumulative model input. Preserve the complete approved goal.
 When finished, return a visible summary without tool calls. Do not claim completion merely because you ran out of budget.
 """
 
@@ -66,6 +70,23 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
     return raw[:max(0, limit - len(suffix.encode()))].decode('utf-8', errors='ignore') + suffix, True
 
 
+def _environment_summary(environment: dict) -> dict:
+    """Keep semantic routing facts; execution commands are persisted separately."""
+    keys = ('root', 'language', 'manifest', 'ready', 'blocked_reason', 'interpreter',
+            'python_version', 'node_version', 'package_manager', 'typescript_sdk',
+            'resolution', 'lockfile')
+    summary = {key: environment[key] for key in ('ready', 'blocked_reason',
+               'check_blocked_reason', 'check_coverage', 'uncovered_roots') if key in environment}
+    summary['projects'] = [
+        {**{key: project[key] for key in keys if key in project},
+         'servers': sorted(project.get('servers', {}))}
+        for project in environment.get('projects', [])
+    ]
+    if len(_encoded({'environment': summary})) > MAX_EVENT_BYTES:
+        raise BudgetExceeded('项目环境摘要超过上下文保存上限')
+    return summary
+
+
 class _Redactor:
     def __init__(self, *secrets: str) -> None:
         self.secrets = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
@@ -92,6 +113,8 @@ def _bounded_payload(payload: dict) -> dict:
     result = ({key: value for key, value in payload.items() if key != 'output'} if is_check else
               {key: payload[key] for key in ('call_id', 'name', 'phase', 'status', 'exit_code', 'ok') if key in payload})
     result['truncated'] = True
+    if is_check and len(_encoded(result)) > MAX_EVENT_BYTES // 2:
+        result['command'], _ = _clip(result['command'], MAX_EVENT_BYTES // 8)
     text = payload['output'] if is_check else _encoded(payload).decode('utf-8')
     low, high = 0, min(len(text), MAX_EVENT_BYTES)
     while low < high:
@@ -116,7 +139,6 @@ class ExecutionEngine:
 
     async def run(self, *, run_id: UUID, source: SourceSnapshot, goal: GoalContent,
                   model: StoredModelSettings, github_token: str, image: str,
-                  setup_command: str, check_command: str,
                   emit: Callable[[str, dict], Awaitable[None]]) -> ExecutionResult:
         workspace = Workspace(run_id, source_transport=self.source_transport)
         # Freeze the configuration supplied by the worker for this run.
@@ -148,12 +170,17 @@ class ExecutionEngine:
             # Await the durable start record before every command side effect.
             await event('state', {'phase': phase, 'command': command, 'status': 'starting'})
             try:
-                result = await (workspace.setup(command) if phase == 'setup' else workspace.shell(command, timeout=60))
+                result = await (workspace.setup() if phase == 'setup' else workspace.shell(command, timeout=60))
+                if phase == 'setup':
+                    environment = await workspace.environment_info()
+                    command = environment.get('setup_command') or command
             except WorkspaceError as exc:
                 item = RunCheck(phase=phase, command=redact(command), exit_code=None,
                                 output=redact(str(exc)), truncated=False)
                 checks.append(item)
                 await event('check', item.model_dump())
+                if phase == 'setup':
+                    await event('context', {'environment': _environment_summary(await workspace.environment_info())})
                 raise
             output, clipped = _clip(redact(result.output), 32 * 1024)
             item = RunCheck(phase=phase, command=redact(command), exit_code=result.exit_code,
@@ -164,19 +191,33 @@ class ExecutionEngine:
 
         async def execute() -> None:
             nonlocal status, report
-            if any(redact(value) != value for value in (setup_command, check_command, image)):
+            if redact(image) != image:
                 raise ModelError('执行参数包含控制面凭据，未启动执行')
-            fixed = redact({'approved_goal': goal.model_dump(mode='json'), 'source_snapshot': source.model_dump(mode='json'),
-                            'working_directory': '/workspace', 'setup_command': setup_command, 'check_command': check_command})
+            fixed = redact({'approved_goal': goal.model_dump(mode='json'),
+                            'source_snapshot': source.model_dump(mode='json'),
+                            'working_directory': '/workspace'})
             await event('context', fixed)
             await event('state', {'status': 'preparing', 'image': image})
             image_id = await workspace.prepare(source=source, github_token=github_token, image=image)
             await event('state', {'status': 'running', 'image_id': image_id})
-            if setup_command:
-                result = await check('setup', setup_command)
-                if result.exit_code != 0:
-                    status, report = 'blocked', '准备命令未成功，未进入模型执行。'
-                    return
+            prepared = await check('setup', '系统自动配置 Python / Node 项目环境')
+            environment = redact(await workspace.environment_info())
+            summary = _environment_summary(environment)
+            await event('context', {'environment': summary})
+            if prepared.exit_code != 0:
+                status, report = 'blocked', '项目环境自动准备失败，未进入模型执行。'
+                return
+            check_command = environment.get('check_command')
+            if not isinstance(check_command, str) or not check_command.strip():
+                status, report = 'blocked', '仓库没有可识别的测试、类型检查或构建入口，未执行虚假的成功检查。'
+                return
+            setup_command = environment.get('setup_command', prepared.command)
+            command_state = {'status': 'environment_ready', 'setup_command': setup_command,
+                             'check_command': check_command}
+            if len(_encoded(command_state)) > MAX_EVENT_BYTES:
+                raise BudgetExceeded('自动解析的执行命令超过保存上限')
+            await event('state', command_state)
+            fixed.update(environment=summary, setup_command=setup_command, check_command=check_command)
             baseline = await check('baseline', check_command)
             fixed_messages = [{'role': 'system', 'content': SYSTEM_PROMPT},
                               {'role': 'user', 'content': _encoded(fixed).decode()}]

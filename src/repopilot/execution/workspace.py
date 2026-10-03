@@ -301,6 +301,8 @@ class Workspace:
         self.final: Path | None = None
         self._lock = asyncio.Lock()
         self._reads: dict[str, str] = {}
+        self._lsp_manager = None
+        self._environment: dict = {'projects': [], 'ready': True}
 
     async def _docker(self, *args: str, **kwargs) -> tuple[int, bytes, bytes]:
         return await _process(['docker', *args], **kwargs)
@@ -330,10 +332,10 @@ class Workspace:
             extract_archive(archive, self.baseline, strip_root=True)
             rc, _, _ = await self._docker('create', '--name', self.container_name, '--pull=never',
                 '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--cpus=2',
-                '--memory=2g', '--pids-limit=256', '--network=none', '--user=1000:1000',
+                '--memory=4g', '--pids-limit=512', '--network=none', '--user=1000:1000',
                 '--workdir=/workspace', '--env=HOME=/home/runner',
-                '--tmpfs=/workspace:rw,nosuid,nodev,size=768m,uid=1000,gid=1000,mode=0755',
-                '--tmpfs=/home/runner:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700',
+                '--tmpfs=/workspace:rw,exec,nosuid,nodev,size=3g,uid=1000,gid=1000,mode=0755',
+                '--tmpfs=/home/runner:rw,exec,nosuid,nodev,size=768m,uid=1000,gid=1000,mode=0700',
                 '--tmpfs=/tmp:rw,nosuid,nodev,size=256m,mode=1777', '--entrypoint=python3', image_id,
                 '-I', '-S', '-c', 'import time; time.sleep(2147483647)')
             if rc:
@@ -372,7 +374,7 @@ class Workspace:
             rc, out, _ = await self._docker('exec', '-i', '--user=1000:1000', '--workdir=/workspace',
                 self.container_name, 'python3', '-I', '-S', '-c', program,
                 data=json.dumps({'name': name, 'arguments': arguments}, ensure_ascii=False).encode(), timeout=timeout + 10,
-                limit=128 * 1024)
+                limit=8 * 1024 * 1024)
             if rc:
                 raise WorkspaceError('容器工具执行失败')
             response = json.loads(out)
@@ -387,38 +389,135 @@ class Workspace:
             await asyncio.shield(self.cleanup())
             raise
 
-    async def shell(self, command: str, *, timeout: float = 60) -> CommandResult:
+    async def _close_lsp(self) -> None:
+        if self._lsp_manager is not None:
+            manager, self._lsp_manager = self._lsp_manager, None
+            try:
+                async with asyncio.timeout(15):
+                    await manager.close()
+            except Exception:
+                await asyncio.shield(self.cleanup())
+                raise WorkspaceError('Language-server shutdown could not be confirmed; execution container was stopped') from None
+            except BaseException:
+                await asyncio.shield(self.cleanup())
+                raise
+
+    async def environment_info(self) -> dict:
+        return json.loads(json.dumps(self._environment))
+
+    async def helper_action(self, name: str, arguments: dict) -> dict:
+        if name not in {'lsp_read', 'lsp_snapshot', 'lsp_apply'}:
+            raise ToolError('Unknown trusted helper action')
+        return await self._helper(name, arguments)
+
+    async def lsp_tool(self, name: str, arguments: dict) -> dict:
+        async with self._lock:
+            if not self.prepared or self._frozen:
+                raise ToolError('Workspace is not available for LSP')
+            if self._lsp_manager is None:
+                from repopilot.execution.lsp import LspManager
+                self._lsp_manager = LspManager(self)
+            try:
+                return await self._lsp_manager.execute(name, arguments)
+            except WorkspaceError:
+                raise
+            except Exception:
+                await asyncio.shield(self.cleanup())
+                raise WorkspaceError('Language-server protocol failed; execution container was stopped') from None
+
+    def _shell_environment(self, cwd: str, project: str | None) -> tuple[str, dict]:
+        if not isinstance(cwd, str) or not cwd or '\x00' in cwd or cwd.startswith('/') or any(part in {'', '..'} for part in cwd.split('/')):
+            raise ToolError('Shell cwd must be a safe relative workspace directory')
+        directory = PurePosixPath(cwd)
+        profiles = self._environment['projects']
+        if project is not None:
+            choices = [p for p in profiles if p['root'] == project]
+            if not choices:
+                raise ToolError('Unknown project environment')
+        else:
+            containing = [p for p in profiles if p['root'] == '.' or directory == PurePosixPath(p['root']) or PurePosixPath(p['root']) in directory.parents]
+            nearest = max(containing, key=lambda p: len(PurePosixPath(p['root']).parts), default=None)
+            choices = [p for p in containing if nearest and p['root'] == nearest['root']]
+        selected = choices[0]['root'] if choices else cwd
+        prefix = '/workspace' if selected == '.' else '/workspace/' + selected
+        env = {'PATH': prefix + '/node_modules/.bin:' + prefix + '/.venv/bin:/usr/local/bin:/usr/bin:/bin',
+               'REPOPILOT_PROJECT_ROOT': prefix}
+        for choice in choices:
+            env.update(choice.get('environment', {}))
+            if choice.get('typescript_sdk'):
+                env['REPOPILOT_TYPESCRIPT_SDK'] = choice['typescript_sdk']
+        return cwd, env
+
+    async def shell(self, command: str, *, timeout: float = 60, cwd: str = '.', project: str | None = None) -> CommandResult:
         if not isinstance(command, str) or '\x00' in command or timeout <= 0 or timeout > 300:
             raise ToolError('Invalid shell command or timeout')
         async with self._lock:
-            result = await self._helper('shell', {'command': command, 'timeout': timeout}, timeout=timeout)
+            await self._close_lsp()
+            cwd, environment = self._shell_environment(cwd, project)
+            result = await self._helper('shell', {'command': command, 'timeout': timeout, 'cwd': cwd, 'environment': environment}, timeout=timeout)
             if result.get('timed_out'):
                 await self.cleanup()
                 raise WorkspaceError('命令超时，执行容器已停止')
             return CommandResult(result['exit_code'], result['output'], result['truncated'])
 
-    async def setup(self, command: str) -> CommandResult:
-        if not command:
-            return CommandResult(0, '', False)
+    async def _prepare_environments(self, *, network: bool, verify: bool = False) -> dict:
+        program = Path(__file__).with_name('environment.py').read_text()
+        previous = self._environment
         try:
-            rc, _, _ = await self._docker('network', 'disconnect', 'none', self.container_name)
-            if rc:
-                raise WorkspaceError('无法切换准备阶段网络', blocked=True)
-            rc, _, _ = await self._docker('network', 'connect', 'bridge', self.container_name)
-            if rc:
-                raise WorkspaceError('无法启用准备阶段网络', blocked=True)
-            result = await self.shell(command, timeout=300)
-            rc, _, _ = await self._docker('network', 'disconnect', 'bridge', self.container_name)
-            if rc:
-                raise WorkspaceError('无法断开准备阶段网络')
-            rc, out, _ = await self._docker('inspect', '--format', '{{json .NetworkSettings.Networks}}', self.container_name)
-            networks = json.loads(out)
-            if rc or not isinstance(networks, dict) or any(name != 'none' for name in networks):
-                raise WorkspaceError('无法确认执行容器已隔离网络')
-            return result
-        except BaseException:
-            await asyncio.shield(self.cleanup())
-            raise
+            self._environment = await self._helper('environment', {'program': program, 'network': network, 'verify': verify}, timeout=300)
+        except ToolError as exc:
+            self._environment = {**previous, 'ready': False, 'blocked_reason': str(exc), 'check_command': ''}
+            raise WorkspaceError('Project environment planning failed: ' + str(exc), blocked=True) from None
+        for project in self._environment['projects']:
+            before = next((p for p in previous['projects'] if p['root'] == project['root'] and p['language'] == project['language']), None)
+            if before:
+                project['commands'] = before.get('commands', []) + project.get('commands', [])
+                project['resolution'] = before.get('resolution', project.get('resolution'))
+        self._environment['setup_command'] = ' ; '.join(value for value in (previous.get('setup_command', ''), self._environment.get('setup_command', '')) if value)
+        self._environment['executed'] = previous.get('executed', []) + self._environment.get('executed', [])
+        return self._environment
+
+    async def setup(self) -> CommandResult:
+        try:
+            async with asyncio.timeout(300):
+                return await self._setup()
+        except TimeoutError:
+            self._environment.update({'ready': False, 'blocked_reason': 'Automatic environment preparation exceeded 300 seconds', 'check_command': ''})
+            raise WorkspaceError('Automatic environment preparation exceeded 300 seconds', blocked=True) from None
+
+    async def _setup(self) -> CommandResult:
+        async with self._lock:
+            await self._close_lsp()
+            try:
+                await self._prepare_environments(network=False)
+                if not self._environment['ready']:
+                    rc, _, _ = await self._docker('network', 'disconnect', 'none', self.container_name)
+                    if rc:
+                        raise WorkspaceError('无法切换准备阶段网络', blocked=True)
+                    rc, _, _ = await self._docker('network', 'connect', 'bridge', self.container_name)
+                    if rc:
+                        raise WorkspaceError('无法启用自动准备阶段网络', blocked=True)
+                    await self._prepare_environments(network=True)
+                    rc, _, _ = await self._docker('network', 'disconnect', 'bridge', self.container_name)
+                    if rc:
+                        raise WorkspaceError('无法断开准备阶段网络')
+                rc, out, _ = await self._docker('inspect', '--format', '{{json .NetworkSettings.Networks}}', self.container_name)
+                networks = json.loads(out)
+                if rc or not isinstance(networks, dict) or any(name != 'none' for name in networks):
+                    raise WorkspaceError('无法确认执行容器已隔离网络')
+                if not self._environment['ready']:
+                    blocked = [p for p in self._environment['projects'] if not p['ready']]
+                    reason = '; '.join(p['root'] + ': ' + p['blocked_reason'] for p in blocked) or self._environment.get('blocked_reason', 'Automatic environment preparation failed')
+                    raise WorkspaceError(reason, blocked=True)
+                await self._prepare_environments(network=False, verify=True)
+                blocked = [p for p in self._environment['projects'] if not p['ready']]
+                if not self._environment['ready']:
+                    reason = '; '.join(p['root'] + ': ' + p['blocked_reason'] for p in blocked) or self._environment.get('blocked_reason', 'Automatic environment preparation failed')
+                    raise WorkspaceError(reason, blocked=True)
+                return CommandResult(0, json.dumps(self._environment, ensure_ascii=False), False)
+            except BaseException:
+                await asyncio.shield(self.cleanup())
+                raise
 
     async def tool(self, name: str, arguments: dict) -> dict:
         if name not in {'read_file', 'search', 'edit_file', 'write_file'}:
@@ -438,15 +537,17 @@ class Workspace:
             if self._frozen and not self._captured:
                 raise WorkspaceError('成果捕获先前失败，无法生成完整 Patch')
             if not self._frozen:
+                await self._close_lsp()
                 # Serialize under the exclusive lock: no future tools can start.
                 # The trusted serializer terminates and rechecks all namespace
                 # writers before reading; PID1 is our immutable sleeping program.
                 self._frozen = True
                 program = Path(__file__).with_name('container_helper.py').read_text()
                 try:
-                    rc, archive, _ = await self._docker('exec', '--user=1000:1000', '--workdir=/workspace',
+                    tracked = [p.relative_to(self.baseline).as_posix() for p in self.baseline.rglob('*') if p.is_file()]
+                    rc, archive, _ = await self._docker('exec', '-i', '--user=1000:1000', '--workdir=/workspace',
                         self.container_name, 'python3', '-I', '-S', '-c', program, 'capture',
-                        limit=MAX_EXPANDED + MAX_MEMBERS * 2048, timeout=90)
+                        data=json.dumps(tracked).encode(), limit=MAX_EXPANDED + MAX_MEMBERS * 2048, timeout=90)
                     if rc:
                         raise WorkspaceError('无法安全停止文件写入并读取最终成果')
                     rc, _, _ = await self._docker('pause', self.container_name)
@@ -460,6 +561,7 @@ class Workspace:
             return await generate_patch(self.baseline, self.final)
 
     async def cleanup(self) -> None:
+        await self._close_lsp()
         rc, out, _ = await self._docker('container', 'ls', '--all', '--filter', f'name=^/{self.container_name}$', '--format', '{{.Names}}', limit=4096)
         if rc:
             raise WorkspaceError('无法确认执行容器清理状态')

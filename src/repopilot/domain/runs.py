@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from repopilot.domain.tasks import GoalContent, PositiveInt, SourceSnapshot, UTCDateTime
 
@@ -19,23 +19,6 @@ class CreateRunRequest(BaseModel):
 
     expected_revision: PositiveInt
     goal_version: PositiveInt
-    image: StrictStr = Field(min_length=1, max_length=256)
-    setup_command: StrictStr = Field(default='', max_length=4000)
-    check_command: StrictStr = Field(min_length=1, max_length=4000)
-
-    @field_validator('image', 'setup_command', 'check_command')
-    @classmethod
-    def reject_nul(cls, value: str) -> str:
-        if '\x00' in value:
-            raise ValueError('执行参数不能包含 NUL')
-        return value
-
-    @field_validator('image', 'check_command')
-    @classmethod
-    def require_nonblank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError('镜像和检查命令不能为空')
-        return value
 
 
 class RunCheck(BaseModel):
@@ -86,5 +69,3 @@ class ClaimedRun:
     source_snapshot: SourceSnapshot
     goal_content: GoalContent
     image: str
-    setup_command: str
-    check_command: str

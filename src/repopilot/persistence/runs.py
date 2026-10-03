@@ -117,8 +117,9 @@ def _json_size(value) -> int:
 
 
 class RunRepository:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, default_image: str = 'repopilot-dev:local') -> None:
         self.database = database
+        self.default_image = default_image
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[AsyncSession]:
@@ -158,7 +159,6 @@ class RunRepository:
             id=row.id, task_id=row.task_id, worker_token=row.worker_token,
             source_snapshot=SourceSnapshot.model_validate(row.source_snapshot),
             goal_content=GoalContent.model_validate(row.goal_content), image=row.image,
-            setup_command=row.setup_command, check_command=row.check_command,
         )
 
     @staticmethod
@@ -183,8 +183,8 @@ class RunRepository:
             now = await session.scalar(select(func.clock_timestamp()))
             row = RunRow(
                 id=uuid4(), task_id=task_id, goal_version=payload.goal_version, status='queued',
-                cancel_requested=False, created_at=now, image=payload.image,
-                setup_command=payload.setup_command, check_command=payload.check_command,
+                cancel_requested=False, created_at=now, image=self.default_image,
+                setup_command='', check_command='',
                 source_snapshot=task.source_snapshot, goal_content=goal.content,
                 report='', patch='', checks=[],
             )
@@ -284,6 +284,20 @@ class RunRepository:
             if row.image_id is not None and row.image_id != image_id:
                 raise TaskError(409, '执行镜像已固定，不能更改')
             row.image_id = image_id
+            return True
+
+    async def set_execution_commands(
+        self, run_id: UUID, worker_token: UUID, *, setup_command: str, check_command: str,
+    ) -> bool:
+        async with self._transaction() as session:
+            row = await self._locked(session, run_id)
+            if not self._owned(row, worker_token):
+                return False
+            if row.check_command:
+                if row.setup_command != setup_command or row.check_command != check_command:
+                    raise TaskError(409, '执行命令已固定，不能更改')
+            else:
+                row.setup_command, row.check_command = setup_command, check_command
             return True
 
     async def append_event(self, run_id: UUID, worker_token: UUID, kind: str, payload: dict, *, secrets: Iterable[str] = ()) -> bool:

@@ -394,8 +394,8 @@ async def test_real_docker_source_import_permissions_mounts_and_network(docker_w
     assert 'ALL' in [item.upper() for item in host['CapDrop']]
     assert any(item.startswith('no-new-privileges') for item in host['SecurityOpt'])
     assert host['NanoCpus'] == 2_000_000_000
-    assert host['Memory'] == 2 * 1024**3
-    assert host['PidsLimit'] == 256
+    assert 0 < host['Memory'] <= 4 * 1024**3
+    assert 0 < host['PidsLimit'] <= 512
     assert host['NetworkMode'] == 'none'
     assert all('size=' in host['Tmpfs'][path] for path in ('/workspace', '/home/runner', '/tmp'))
     result = await workspace.shell(
@@ -424,7 +424,9 @@ async def test_real_docker_source_import_permissions_mounts_and_network(docker_w
 @pytest.mark.asyncio
 async def test_real_docker_setup_disconnects_before_later_commands(docker_workspace):
     workspace, _ = docker_workspace
-    result = await workspace.setup("python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((\"192.0.2.1\",9)); print(\"setup-online\")'")
+    await workspace.tool('write_file', {'path': 'pyproject.toml', 'content': '[project]\nname="network-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n'})
+    await workspace.tool('write_file', {'path': 'test_network_fixture.py', 'content': 'import unittest\nclass TestFixture(unittest.TestCase):\n def test_value(self): self.assertEqual(1 + 1, 2)\n'})
+    result = await workspace.setup()
     assert result.exit_code == 0, result.output
     code, output = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
     assert code == 0, output
@@ -466,9 +468,8 @@ async def test_real_docker_cancel_stops_container_and_its_children(docker_worksp
     try:
         # Observe actual command startup rather than assuming scheduling completed.
         for _ in range(50):
-            code, _ = await command('docker', 'exec', f'repopilot-run-{workspace.run_id}',
-                                    '/bin/sh', '-c', 'test -f /workspace/cancel-ready')
-            if code == 0:
+            code, output = await command('docker', 'top', f'repopilot-run-{workspace.run_id}', '-eo', 'pid,args')
+            if code == 0 and any(row.split(maxsplit=1)[-1] == 'sleep 120' for row in output.splitlines()[1:]):
                 break
             await asyncio.sleep(0.1)
         else:

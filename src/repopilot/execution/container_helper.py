@@ -74,12 +74,20 @@ def stop_residuals() -> None:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                raise RuntimeError('Unable to terminate residual container process') from None
         time.sleep(.05)
     raise RuntimeError('Unable to confirm command process cleanup')
 
 
-def shell(command: str, timeout: float) -> dict:
-    proc = subprocess.Popen(['/bin/sh', '-lc', command], cwd=ROOT,
+def shell(command: str, timeout: float, cwd: str = '.', environment: dict | None = None) -> dict:
+    directory = path(cwd)
+    if not directory.is_dir():
+        raise ValueError('Shell cwd must be a directory')
+    stop_residuals()
+    env = os.environ.copy()
+    env.update(environment or {})
+    proc = subprocess.Popen(['/bin/sh', '-c', command], cwd=directory, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
     assert proc.stdout is not None
@@ -121,7 +129,104 @@ def shell(command: str, timeout: float) -> dict:
 
 def execute(name: str, args: dict) -> dict:
     if name == 'shell':
-        return shell(args['command'], args['timeout'])
+        return shell(args['command'], args['timeout'], args.get('cwd', '.'), args.get('environment'))
+    if name == 'environment':
+        stop_residuals()
+        namespace = {'__name__': 'repopilot_environment'}
+        try:
+            exec(compile(args['program'], '<trusted-environment>', 'exec'), namespace)
+            return namespace['prepare_environments'](ROOT, network=args.get('network', False), verify=args.get('verify', False))
+        finally:
+            stop_residuals()
+    if name == 'lsp_read':
+        data = file_bytes(path(args['path']))
+        text = data.decode('utf-8')
+        if '\x00' in text:
+            raise ValueError('Binary file cannot be read')
+        return {'content': text, 'sha256': hashlib.sha256(data).hexdigest()}
+    if name == 'lsp_snapshot':
+        files = []
+        count = 0
+        for directory, dirs, names in os.walk(ROOT, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d not in {'.git', '.venv', 'node_modules', '__pycache__', 'dist', 'build', '.yarn'} and not (Path(directory) / d).is_symlink())
+            count += len(dirs) + len(names)
+            if count > 20000:
+                raise ValueError('Snapshot exceeds 20000 entries')
+            for filename in sorted(names):
+                candidate = Path(directory) / filename
+                try:
+                    safe = path(candidate.relative_to(ROOT).as_posix())
+                    data = file_bytes(safe)
+                except ValueError:
+                    continue
+                files.append({'path': candidate.relative_to(ROOT).as_posix(), 'sha256': hashlib.sha256(data).hexdigest()})
+        return {'files': files}
+    if name == 'lsp_apply':
+        stop_residuals()
+        import tempfile
+        operations = args.get('operations', [])
+        expected = args.get('expected', {})
+        if not isinstance(operations, list) or len(operations) > 100 or not isinstance(expected, dict) or len(expected) > 20000:
+            raise ValueError('Workspace edit exceeds bounds')
+        backups = {}
+        for name, digest in expected.items():
+            target = path(name, new=True)
+            if digest is None:
+                if target.exists():
+                    raise ValueError('Workspace edit target already exists')
+            elif not target.is_file() or hashlib.sha256(file_bytes(target)).hexdigest() != digest:
+                raise ValueError('Workspace edit is stale; files changed')
+        touched = set()
+        for operation in operations:
+            kind = operation.get('kind')
+            names = [operation['path']] + ([operation['old_path']] if kind == 'rename' else [])
+            if kind not in {'text', 'create', 'rename', 'delete'}:
+                raise ValueError('Unsupported workspace edit operation')
+            for name in names:
+                target = path(name, new=True)
+                if name not in expected:
+                    raise ValueError('Every affected path requires an expected version')
+                touched.add(name)
+                backups[name] = (file_bytes(target), stat.S_IMODE(target.stat().st_mode)) if target.exists() else None
+            if kind in {'text', 'create'} and len(operation['content'].encode('utf-8')) > MAX_FILE:
+                raise ValueError('Workspace edit file exceeds 1 MiB')
+        def replace(target, data, mode=0o644):
+            fd, temporary = tempfile.mkstemp(prefix='.repopilot-lsp-', dir=target.parent)
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(data)
+                    os.fchmod(stream.fileno(), mode)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        try:
+            for operation in operations:
+                target = path(operation['path'], new=True)
+                kind = operation['kind']
+                source = path(operation.get('old_path', operation['path']), new=True)
+                if kind != 'create' and (not source.is_file() or hashlib.sha256(file_bytes(source)).hexdigest() != operation.get('expected_sha256')):
+                    raise ValueError('Operation intermediate version disagrees with plan')
+                if kind in {'text', 'create'}:
+                    if kind == 'create' and target.exists():
+                        raise ValueError('Create target exists')
+                    replace(target, operation['content'].encode('utf-8'), stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644)
+                elif kind == 'delete':
+                    target.unlink()
+                else:
+                    if target.exists():
+                        raise ValueError('Rename target exists')
+                    os.replace(path(operation['old_path']), target)
+        except BaseException:
+            for name, backup in backups.items():
+                target = path(name, new=True)
+                if backup is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    replace(target, *backup)
+            raise
+        return {'applied': True, 'files': [{'path': name, 'sha256': hashlib.sha256(file_bytes(path(name))).hexdigest() if path(name, new=True).exists() else None} for name in sorted(touched)]}
     target = path(args.get('path', '.'), new=name == 'write_file')
     if name == 'read_file':
         data = file_bytes(target)
@@ -242,8 +347,27 @@ def transfer(mode: str) -> None:
     # Only this trusted read-only serializer and the trusted sleeping PID1 remain.
     stop_residuals()
     total = 0
+    payload = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
+    if len(payload) > 4 * 1024 * 1024:
+        raise ValueError('Baseline capture allowlist exceeds safety bound')
+    tracked = json.loads(payload or b'[]')
+    if not isinstance(tracked, list) or len(tracked) > 20000 or any(not isinstance(name, str) or name.startswith('/') or any(part in {'', '..', '.git'} for part in name.split('/')) for name in tracked):
+        raise ValueError('Unsafe baseline capture allowlist')
+    tracked = set(tracked)
+    ancestors = {('/'.join(name.split('/')[:index])) for name in tracked for index in range(1, len(name.split('/')))}
+    def candidates():
+        ignores = {'.venv', 'node_modules', '__pycache__', 'dist', 'build', '.yarn', '.pnpm-store'}
+        for directory, dirs, files in os.walk(ROOT, followlinks=False):
+            relative = Path(directory).relative_to(ROOT)
+            inside_ignored = any(part in ignores for part in relative.parts)
+            dirs[:] = sorted(d for d in dirs if (not inside_ignored and d not in ignores) or (relative / d).as_posix() in ancestors)
+            for filename in sorted(dirs + files):
+                candidate = Path(directory) / filename
+                if filename not in dirs and inside_ignored and candidate.relative_to(ROOT).as_posix() not in tracked:
+                    continue
+                yield candidate
     with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
-        for index, candidate in enumerate(sorted(ROOT.rglob('*'))):
+        for index, candidate in enumerate(candidates()):
             if index >= 20000:
                 raise ValueError('Final archive has too many members')
             name = candidate.relative_to(ROOT).as_posix()

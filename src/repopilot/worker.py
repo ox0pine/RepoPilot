@@ -123,6 +123,12 @@ class Worker:
                     if kind == 'state' and payload.get('image_id') is not None:
                         if not await self.repository.set_image_id(run.id, run.worker_token, payload['image_id']):
                             raise _PersistenceFailure
+                    if kind == 'state' and payload.get('status') == 'environment_ready':
+                        if not await self.repository.set_execution_commands(
+                            run.id, run.worker_token,
+                            setup_command=payload['setup_command'], check_command=payload['check_command'],
+                        ):
+                            raise _PersistenceFailure
                     if not await self.repository.append_event(
                         run.id, run.worker_token, kind, payload, secrets=secrets,
                     ):
@@ -136,7 +142,7 @@ class Worker:
             return await self.engine.run(
                 run_id=run.id, source=run.source_snapshot, goal=run.goal_content,
                 model=model, github_token=token, image=run.image,
-                setup_command=run.setup_command, check_command=run.check_command, emit=emit,
+                emit=emit,
             )
 
         task = asyncio.create_task(execute())
