@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { NAlert, NButton, NInput, type InputInst } from 'naive-ui'
-import { ArrowLeft, GitBranch, Plus, Settings } from '@lucide/vue'
+import { ArrowLeft, ArrowRight, CircleAlert, GitBranch, GitCommitHorizontal, Link, Settings, ShieldCheck } from '@lucide/vue'
 import { ApiError } from '../api/client'
 import { createTask, type CreateTask } from '../api/tasks'
 import { followLink, navigate } from '../router'
@@ -149,39 +149,48 @@ async function submit(): Promise<void> {
   <section class="new-conversation" aria-labelledby="new-conversation-title">
     <a class="back-link" href="/app" @click="followLink($event, '/app')"><ArrowLeft :size="16" aria-hidden="true" />返回工作台</a>
     <header class="page-header">
-      <p class="eyebrow">从真实 Issue 开始</p>
+      <p class="eyebrow">从 Issue 到可审阅的代码变更</p>
       <h1 id="new-conversation-title">新建对话</h1>
-      <p class="description">填写来源后生成目标，批准不会立即执行代码。</p>
+      <p class="description">选择问题与代码版本，先生成目标，再由你决定是否执行。</p>
     </header>
+    <ol class="creation-steps" aria-label="任务流程">
+      <li aria-current="step"><span class="step-number">1</span><span>固定来源</span></li>
+      <li><span class="step-number">2</span><span>审阅与批准目标</span></li>
+      <li><span class="step-number">3</span><span>执行并审阅变更</span></li>
+    </ol>
     <form class="source-form" novalidate :aria-busy="creating" @submit.prevent="submit">
-      <div class="form-intro"><span class="source-icon"><GitBranch :size="20" aria-hidden="true" /></span><div><h2>对话来源</h2><p>目前仅支持 GitHub 仓库及同仓库的 Issue，不支持 Pull Request。</p></div></div>
+      <div class="form-intro"><div><h2>对话来源</h2><p>固定仓库、代码版本与 Issue，作为本次任务的共同依据。</p></div><span class="source-badge"><GitBranch :size="14" aria-hidden="true" />GitHub</span></div>
+      <section v-if="requestError && needsSettings" class="configuration-notice" role="alert" aria-labelledby="configuration-title">
+        <CircleAlert :size="20" class="notice-icon" aria-hidden="true" />
+        <div class="notice-content"><h3 id="configuration-title">先完成 GitHub 访问配置</h3><p>{{ requestError }}</p><p class="notice-hint">填写的来源已保留。保存配置后，回到这里重新校验即可。</p></div>
+        <NButton attr-type="button" class="settings-button" aria-haspopup="dialog" @click="emit('settings')"><template #icon><Settings :size="16" aria-hidden="true" /></template>打开设置</NButton>
+      </section>
       <div class="field">
-        <label for="conversation-repository">仓库链接</label>
+        <div class="field-heading"><label for="conversation-repository"><GitBranch :size="16" aria-hidden="true" />仓库链接</label><span class="field-tag">HTTPS</span></div>
         <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'conversation-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" @blur="validate('repository_url')" />
-        <p id="repository-help" class="field-help">填写 HTTPS 链接；私有仓库需要已配置的 GitHub token 具备读取权限。</p>
+        <p id="repository-help" class="field-help">GitHub 仓库主页地址。读取私有仓库需要相应的 token 权限。</p>
         <p v-if="errors.repository_url" id="repository-error" class="field-error" role="alert">{{ errors.repository_url }}</p>
       </div>
       <div class="field">
-        <label for="conversation-commit">完整 commit SHA</label>
-        <NInput ref="commitInput" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="粘贴完整的 40 位 commit SHA" :input-props="{ id: 'conversation-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
-        <p id="commit-help" class="field-help">使用该仓库的完整 40 位十六进制 SHA，不支持分支名或短 SHA。</p>
+        <div class="field-heading"><label for="conversation-commit"><GitCommitHorizontal :size="16" aria-hidden="true" />代码版本</label><span class="field-tag">完整 commit SHA</span></div>
+        <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="粘贴 40 位 commit SHA" :input-props="{ id: 'conversation-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
+        <p id="commit-help" class="field-help">从仓库的提交页面复制完整 SHA，不使用分支名或短 SHA。每次执行均从此版本开始。</p>
         <p v-if="errors.baseline_commit" id="commit-error" class="field-error" role="alert">{{ errors.baseline_commit }}</p>
       </div>
       <div class="field">
-        <label for="conversation-issue">Issue 链接</label>
+        <div class="field-heading"><label for="conversation-issue"><Link :size="16" aria-hidden="true" />Issue 链接</label><span class="field-tag">同一仓库</span></div>
         <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'conversation-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" @blur="validate('issue_url')" />
-        <p id="issue-help" class="field-help">Issue 必须属于上方仓库。创建后保存来源快照，更换来源需新建对话。</p>
+        <p id="issue-help" class="field-help">使用上述仓库的 Issue，不支持 Pull Request。更换来源需新建对话。</p>
         <p v-if="errors.issue_url" id="issue-error" class="field-error" role="alert">{{ errors.issue_url }}</p>
       </div>
-      <NAlert v-if="requestError" type="error" :show-icon="false" role="alert" class="request-error">
+      <NAlert v-if="requestError && !needsSettings" type="error" :show-icon="true" role="alert" class="request-error" title="暂时无法创建对话">
         {{ requestError }}
         <p v-if="uncertainResult" class="error-guidance">不会自动重新提交。可返回工作台刷新最近对话，避免重复创建。</p>
-        <NButton v-if="needsSettings" attr-type="button" class="settings-button" aria-haspopup="dialog" @click="emit('settings')"><template #icon><Settings :size="16" aria-hidden="true" /></template>打开设置</NButton>
         <a v-if="uncertainResult" class="back-link" href="/app" @click="followLink($event, '/app')">查看最近对话</a>
       </NAlert>
       <footer class="form-footer">
-        <p>目标基于 Issue 快照生成，不代表已检索代码或验证计划。</p>
-        <NButton type="primary" attr-type="submit" class="submit-button" :loading="creating" :disabled="creating"><template #icon><Plus v-if="!creating" :size="18" aria-hidden="true" /></template>{{ creating ? '正在校验来源' : '创建并生成目标' }}</NButton>
+        <div class="creation-note"><ShieldCheck :size="18" aria-hidden="true" /><p>创建时读取 Issue 和有限源码上下文。<br><span>仅生成目标，不会自动执行或修改代码。</span></p></div>
+        <NButton type="primary" attr-type="submit" class="submit-button" :loading="creating" :disabled="creating"><template #icon><ArrowRight v-if="!creating" :size="17" aria-hidden="true" /></template>{{ creating ? '正在校验来源' : needsSettings ? '重新校验并生成目标' : '创建并生成目标' }}</NButton>
       </footer>
       <p class="submission-status" role="status" aria-live="polite">{{ creating ? '正在校验仓库、commit 与 Issue，请稍候。' : '' }}</p>
     </form>
@@ -189,32 +198,51 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-.new-conversation { width: 100%; max-width: 720px; margin: 0 auto; padding: 32px 0 48px; min-width: 0; overflow-wrap: anywhere; }
-.back-link { display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); text-decoration: none; min-height: 40px; }
+.new-conversation { width: 100%; max-width: 800px; margin: 0 auto; padding: 0 0 32px; min-width: 0; overflow-wrap: anywhere; }
+.back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); text-decoration: none; min-height: 36px; font-size: 13px; }
 .back-link:hover { color: var(--accent); }
 .back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
-.page-header { margin: 24px 0; }
-.eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 13px; font-weight: 600; }
-h1 { margin: 0 0 12px; font-size: clamp(26px, 3vw, 32px); font-weight: 650; line-height: 1.3; letter-spacing: -0.025em; }
-.description { margin: 0; color: var(--text-secondary); font-size: 15px; }
-.source-form { padding: 28px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.form-intro { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 28px; }
-.source-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 40px; height: 40px; color: var(--accent); background: var(--accent-soft); border-radius: 10px; }
-h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-.form-intro p { margin: 0; font-size: 13px; color: var(--text-secondary); }
-.field { margin-bottom: 24px; min-width: 0; }
-.field label { display: block; margin-bottom: 8px; font-weight: 600; }
+.page-header { margin: 18px 0 22px; }
+.eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 12px; font-weight: 600; }
+h1 { margin: 0 0 10px; font-size: clamp(26px, 3vw, 32px); font-weight: 650; line-height: 1.3; letter-spacing: -0.025em; }
+.description { margin: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
+.creation-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0; margin: 0 0 24px; list-style: none; }
+.creation-steps li { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 12px; }
+.creation-steps li[aria-current] { color: var(--accent); font-weight: 600; }
+.step-number { display: inline-flex; flex: 0 0 24px; width: 24px; height: 24px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 50%; font-size: 11px; }
+[aria-current] .step-number { color: var(--surface); background: var(--accent); border-color: var(--accent); }
+.source-form { padding: 24px 28px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.form-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 20px; margin-bottom: 22px; border-bottom: 1px solid var(--border-soft); }
+h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.form-intro p { margin: 0; font-size: 12px; line-height: 1.7; color: var(--text-secondary); }
+.source-badge { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 4px 9px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-secondary); font-size: 11px; }
+.field { margin-bottom: 22px; min-width: 0; }
+.field-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.field label { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+.field label svg { color: var(--text-muted); }
+.field-tag { color: var(--text-muted); font-size: 11px; text-align: right; }
 .field :deep(.n-input) { min-height: 42px; }
-.field-help, .field-error { margin: 8px 0 0; font-size: 12px; line-height: 1.6; }
+.commit-input :deep(input) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.field-help, .field-error { margin: 7px 0 0; font-size: 12px; line-height: 1.6; }
 .field-help { color: var(--text-muted); }
 .field-error { color: var(--danger-text); }
-.request-error { margin-bottom: 24px; }
-.settings-button { margin-top: 12px; min-height: 40px; }
+.configuration-notice { display: flex; align-items: flex-start; gap: 12px; padding: 16px; margin-bottom: 22px; background: var(--warning-bg); border-radius: 8px; color: var(--warning-text); }
+.notice-icon { flex-shrink: 0; margin-top: 1px; }
+.notice-content { min-width: 0; flex: 1; }
+.notice-content h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+.notice-content p { margin: 0; font-size: 12px; line-height: 1.7; }
+.notice-content .notice-hint { margin-top: 4px; }
+.settings-button { flex-shrink: 0; min-height: 36px; }
+.request-error { margin-bottom: 22px; }
 .error-guidance { margin: 8px 0 0; }
-.form-footer { display: flex; flex-direction: column; gap: 16px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
-.form-footer p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.submit-button { min-height: 44px; width: 100%; }
+.form-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+.creation-note { display: flex; gap: 8px; align-items: flex-start; color: var(--text-muted); }
+.creation-note svg { flex-shrink: 0; margin-top: 2px; }
+.creation-note p { margin: 0; font-size: 12px; line-height: 1.7; }
+.creation-note span { color: var(--text-secondary); }
+.submit-button { min-height: 42px; flex-shrink: 0; }
 .submission-status { margin: 12px 0 0; color: var(--text-secondary); font-size: 13px; }
 .submission-status:empty { display: none; }
-@media (max-width: 768px) { .new-conversation { padding: 16px 0 32px; } .page-header { margin-top: 16px; } .source-form { padding: 20px 16px; } }
+@media (max-width: 768px) { .new-conversation { padding: 0 0 24px; } .page-header { margin-top: 14px; } .source-form { padding: 20px; } .creation-steps { gap: 8px; } }
+@media (max-width: 560px) { .source-form { padding: 20px 16px; } .form-intro { gap: 10px; } .creation-steps li { flex-direction: column; align-items: flex-start; gap: 6px; font-size: 11px; } .form-footer { flex-direction: column; align-items: stretch; gap: 16px; } .submit-button { width: 100%; min-height: 44px; } .configuration-notice { flex-wrap: wrap; } .notice-content { flex-basis: calc(100% - 32px); } .settings-button { margin-left: 32px; } }
 </style>
