@@ -21,7 +21,7 @@ export const themeOverrides: GlobalThemeOverrides = {
     bodyColor: palette.bg, cardColor: palette.surface, modalColor: palette.surface,
     textColorBase: palette.text, textColor1: palette.text, textColor2: palette['text-secondary'],
     textColor3: palette['text-muted'], borderColor: palette.border,
-    fontFamily: 'var(--sans)', fontSize: '14px', lineHeight: '1.6',
+    fontFamily: 'var(--serif)', fontSize: '14px', lineHeight: '1.6',
     borderRadius: '8px', heightMedium: '40px',
   },
   Card: { borderRadius: '12px' },

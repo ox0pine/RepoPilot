@@ -1,6 +1,6 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font: 400 14px/1.6 var(--sans); font-synthesis: none; -webkit-font-smoothing: antialiased; }
+body { background: var(--bg); color: var(--text); font: 400 14px/1.6 var(--serif); font-synthesis: none; -webkit-font-smoothing: antialiased; }
 h1, h2, h3 { margin: 0 0 12px; font-weight: 600; line-height: 1.4; }
 h2 { font-size: 20px; } h3 { font-size: 16px; }
 p { margin: 0 0 12px; }
