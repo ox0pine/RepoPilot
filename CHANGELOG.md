@@ -6,6 +6,29 @@
 
 ## 未发布
 
+### 新建对话页面调整
+
+- 收紧页面顶端和表单留白，增加“固定来源 → 审阅与批准 → 执行审阅”的流程说明，重排来源卡片和按钮层级。
+- 仓库、代码版本和 Issue 使用一致的标签与辅助说明；SHA 输入使用等宽字体。
+- 将 GitHub 配置缺失改为卡片顶部的前置条件提示，保留设置入口及输入草稿；一般请求错误和结果不明提示仍独立显示，不自动重新提交。
+- 修正来源说明：创建会读取 Issue 与有限源码上下文，不声称已经执行验证。
+- 浏览器在 1119×1270 和 390×844 验证布局无横向溢出；设置关闭焦点返回、草稿保留、键盘校验及未知提交结果提示通过。故障交互使用受控 API fixture，未修改用户设置或创建真实任务。
+
+### 自动 Python / Node 环境与 LSP
+
+- Run 创建仅接受 `expected_revision` 与 `goal_version`，移除客户端镜像、准备命令和检查命令字段；执行页面只保留开始、取消和证据审阅。
+- 系统自动识别 Python/Node 项目根、版本要求、包管理器与锁文件，准备独立 `.venv` / 前端依赖。支持自动获取兼容 Python、Node 20/22，以及项目声明的 npm/pnpm/Yarn 版本；锁文件不一致或依赖安装失败明确受阻。
+- 标准 npm/Yarn workspaces 和 pnpm-workspace 项目继承根包管理器、锁文件与依赖安装，解析提升的依赖和 TypeScript SDK；独立项目仍保持各自环境。Shell 在子目录继承最近项目环境，LSP 使用只读工具链绝对路径，避免仓库 PATH 替换语言服务器运行时。
+- 自动选择仓库已有 pytest/unittest 或前端 test/typecheck/build 入口，保存实际命令和子项目检查覆盖范围；没有检查入口不会伪造通过。
+- 执行镜像提供隔离安装的 Pyright、Ruff、TypeScript、Vue、HTML/CSS/JSON 语言服务器；Worker 保持控制面，不在宿主或 Worker 中运行仓库代码。
+- 新增真实 LSP 状态、诊断、hover、定义/类型定义/实现/引用、文档/工作区符号、调用层级、重命名、代码操作、格式化和安全跨文件应用工具。采用 stdio JSON-RPC，处理 capability、取消、UTF16 坐标与过期文件版本。
+- Shell、准备和成果捕获前关闭语言服务器并严格清理后台进程；后续请求重建当前文件会话。修改计划校验全部文件版本、路径和冲突，异常回滚；不向模型开放任意服务端命令。
+- 修复 Docker tmpfs 默认 noexec 导致自动下载的解释器/Node 无法运行的问题；保持只读 rootfs、nosuid/nodev、无宿主挂载和凭据隔离。沙箱内存上限为 4 GiB，累计模型输入预算调整为 2 MiB。
+- 修复 TypeScript 初始语法服务器返回导入别名而不是语义定义的问题；正确处理 Vue/TypeScript 消息桥接及 CSS/JSON 验证配置。导入绑定的本地别名重命名与声明级跨文件重命名仍保持上游真实语义。
+- 保留 Redis、现有数据和凭据；没有重建或替换用户运行中的部署。
+
+**已执行的验证**：独立 PostgreSQL/Redis、真实 Docker 启用下完整回归 **561 项通过，无跳过**，包含 Python、TS/React/Vue、HTML/CSS/JSON、跨文件重命名、过期计划拒绝、npm workspace 跨包定位、自动 Python/Node 与 pnpm/Yarn 版本准备。`ruff --select E4,E7,E9,F`、前端构建及运行镜像/Worker 镜像构建通过。隔离 API/Worker/网页在桌面及移动尺寸完成无环境输入的创建、批准、执行和审阅；真实 Python LSP 定义/引用/诊断参与受控模型循环，自动 unittest baseline 失败、final 通过，网页下载 Patch 可应用到干净基线。此处模型与 GitHub HTTP 使用受控 transport，不宣称真实提供方全链验证。保留现有 SSH DSA 弃用警告和 Vite 大 chunk 提示。
+
 ### 文档
 
 - 重写 README，集中说明当前能力、Docker 部署、配置、使用流程、安全边界、数据运维、本地开发和主要 API。

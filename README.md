@@ -12,7 +12,7 @@ RepoPilot 是面向 Python、React 和 Vue 仓库的目标驱动编码工作台�
 
 - 当前功能、安装和操作说明：本文。
 - 功能演进、修复和历史验收：[CHANGELOG.md](CHANGELOG.md)。
-- 产品规划与架构决策：[development-plan/](development-plan/README.md)。其中长期路线不代表已实现能力；当前交付范围以决策 D-021、D-022 为准。
+- 产品规划与架构决策：[development-plan/](development-plan/README.md)。其中长期路线不代表已实现能力；当前交付范围以决策 D-021、D-022、D-023 为准。
 
 ## 当前能力与边界
 
@@ -20,10 +20,11 @@ RepoPilot 是面向 Python、React 和 Vue 仓库的目标驱动编码工作台�
 - 校验 GitHub HTTPS 仓库、完整 commit SHA 和同仓库 Issue；保存不可变来源与有限源码上下文。
 - 生成、反馈修改和批准 Goal；保留版本与消息记录。
 - 显式创建 Run，由单个顺序 Worker 在独占 Docker 容器中执行。
+- 自动解析 Python/Node 项目，创建各自的 `.venv` / 前端依赖环境，配置真实语言服务器；用户无需填写镜像、安装或检查命令。
 - 轮询执行状态，查看工具日志、实际命令、退出码、报告与 Diff，下载 `.patch` 和 `.json`。
 - 支持取消与中断清理；切换页面、刷新或退出登录不会取消 Run。
 
-不支持 SSE、执行中反馈、继承上一轮成果继续修改或 PR 发布。每次 Run 都从固定 commit 重新开始。通用镜像提供 Python/Node 工具，但不保证任意项目依赖自动可用；Python、React、Vue 的完整真实项目任务集与独立验收仍需扩展。
+不支持 SSE、执行中反馈、继承上一轮成果继续修改或 PR 发布。每次 Run 都从固定 commit 重新开始。当前自动环境与语义工具仅覆盖 Python 和 Node 前端（JS/TS/React/Vue、HTML/CSS/JSON），不加入其他语言执行器。依赖下载失败、版本约束冲突或缺少可信检查入口会明确失败或受阻，不伪造成功；完整真实项目任务集与独立验收仍需扩展。
 
 ## 快速开始：Docker 部署
 
@@ -70,9 +71,9 @@ docker compose --profile execution up -d --build worker
 docker compose --profile execution ps
 ```
 
-默认开发镜像包含 Python 3.12、Node 22、Git、ripgrep 和 pytest。也可使用预装项目依赖的镜像，但须提供 `python3`、`/bin/sh` 及项目所需工具。
+执行镜像提供 Python 3.12、Node 22、uv、npm/pnpm/yarn 和独立安装的 Pyright、Ruff、TypeScript/Vue、HTML/CSS/JSON 语言服务器。不同项目的依赖不会安装到 Worker 或语言服务器目录；LSP 绑定项目自己的解释器与 TypeScript SDK。
 
-Worker 必须能通过 Docker daemon 找到指定镜像。`EXECUTION_IMAGE` 只提供表单默认值，不会自动构建或拉取镜像；镜像缺失时 Run 为 `blocked`。没有 Worker 时，Run 保持排队。
+部署者构建一次镜像并启动 Worker 后，任务用户不再选择环境。`EXECUTION_IMAGE` 是服务端镜像配置，不是客户端表单字段；Worker 必须能访问该镜像，缺失则 Run 为 `blocked`。Python 可自动从 uv 管理的工具链中选择满足约束的版本；Node 可自动匹配 20/22 系列并校验官方下载。没有 Worker 时，Run 保持排队。
 
 ### 主要配置
 
@@ -85,7 +86,7 @@ Worker 必须能通过 Docker daemon 找到指定镜像。`EXECUTION_IMAGE` 只�
 | `DATABASE_URL` | 宿主运行 API/Worker 时使用的 PostgreSQL 连接 |
 | `REDIS_URL` | 宿主运行 API 时使用的 Redis 连接 |
 | `GITHUB_CREDENTIALS_KEY` | GitHub token 和私钥的稳定 Fernet 加密主密钥 |
-| `EXECUTION_IMAGE` | 执行表单默认镜像，默认 `repopilot-dev:local` |
+| `EXECUTION_IMAGE` | 服务端执行镜像，默认 `repopilot-dev:local`，任务用户无需选择 |
 | `WEB_PORT` / `API_PORT` / `POSTGRES_PORT` / `REDIS_PORT` | 对应宿主端口覆盖值 |
 
 Compose 会给 API/Worker 注入容器网络连接地址。容器访问宿主机模型服务时，应使用 `host.docker.internal`，不是容器内的 `127.0.0.1`。
@@ -113,11 +114,15 @@ SSH 公钥授权是单独的可选操作，**生成 Goal 和运行 Agent 不需�
 
 ### 执行与审阅
 
-在“执行与成果审阅”中填写：
+用户只需点击“开始执行”。系统读取固定仓库中的项目声明，并自动完成：
 
-- **执行镜像**：已准备好的 Docker 镜像。
-- **准备命令**：可空。填写代表可信用户允许依赖安装脚本在准备阶段联网。
-- **检查命令**：必填。执行器先运行一次记录 baseline，模型提出结束后再次运行同一命令。
+1. 识别各项目根的 `pyproject.toml` / `package.json`，核对版本约束、包管理器和锁文件。
+2. Python 用 uv 创建每个项目独立的 `.venv`；存在 `uv.lock` 时锁定同步，无锁时自动解析并记录。Node 按项目锁文件和 `packageManager` 自动选择、准备 npm/pnpm/yarn，依赖留在项目环境内。
+3. 优先离线准备；需要获取工具链或依赖时仅在准备阶段联网，安装结束后断网并再次验证环境。版本冲突或安装失败保留实际错误。
+4. 配置匹配的语言服务器，使用实际项目解释器、依赖和 TS SDK。
+5. 从项目已有 pytest/unittest 测试或前端 `test`、`typecheck`、`build` 脚本选择固定检查，先记录 baseline，模型提出结束后再运行同一命令。没有可识别检查入口时受阻，不用空命令代替验证。
+
+页面只读展示项目根、语言、工具链、依赖准备状态、LSP 配置、实际准备及检查命令。monorepo 的检查覆盖范围和未覆盖项目根会记录到环境上下文，不能把某个子项目通过当成整个仓库独立验收。
 
 点击“开始执行”只创建排队记录，不在 API 请求内运行 Docker。同一对话只能有一个排队或运行中的 Run；活跃执行期间不能修改 Goal。
 
@@ -127,6 +132,14 @@ SSH 公钥授权是单独的可选操作，**生成 Goal 和运行 Agent 不需�
 
 提交结果不明时只重新读取，不自动重发。读取失败保留已有内容，并要求显式重读。报告、日志和 Patch 均按纯文本展示。
 
+### 语义工具与文件一致性
+
+Agent 可调用 `lsp_status`、`lsp_diagnostics`、`lsp_hover`、定义/类型定义/实现/引用、文档/工作区符号、调用层级、重命名、代码操作和格式化。返回 `unsupported`、`not_ready` 或 `error` 时不视作“没有问题”。工具位置使用从 1 开始的行与 Unicode 字符列，内部转换 LSP 位置编码。
+
+重命名、代码操作和格式化先返回不可伪造的修改计划 ID；`apply_workspace_edit` 校验文件 hash/版本、路径和修改冲突后应用，过期计划拒绝。不能通过工具提交任意 JSON-RPC 或执行任意语言服务器命令。TypeScript 导入绑定重命名可能只修改本文件别名；跨文件修改应选择真实声明。
+
+LSP 在 Run 容器中按项目运行，查询前同步已变更文件。Shell、环境准备和成果捕获前关闭语言服务器，保留严格后台进程清理；后续语义请求重建会话，旧计划失效。LSP 安装脚本、插件或项目导入不等于可信代码，只能在沙箱中运行。模型上下文始终保留 Goal、来源及环境摘要，动态历史保留最近六个批次，不把整个语义索引发送给模型。
+
 ## 执行限制与安全边界
 
 | 项目 | 上限或规则 |
@@ -135,14 +148,14 @@ SSH 公钥授权是单独的可选操作，**生成 Goal 和运行 Agent 不需�
 | 文件树 | 响应 2 MiB，解析最多 10,000 条，保存最多 500 条路径 |
 | 源码上下文 | 最多 12 个 blob；单个下载 64 KiB、注入 16 KiB，总注入 64 KiB |
 | Goal 生成 | 单次 60 秒，响应 256 KiB，只接受 JSON 对象 |
-| 执行模型循环 | 全 Run 900 秒、24 轮、累计模型输入 256 KiB；每次调用 60 秒、响应 256 KiB |
-| 命令 | 准备命令 300 秒；普通 Shell 60 秒，超时停止容器 |
-| 容器资源 | 2 CPU、2 GiB 内存、256 PID；工作区、HOME、临时目录为限额 tmpfs |
+| 执行模型循环 | 全 Run 900 秒、24 轮、累计模型输入 2 MiB；每次调用 60 秒、响应 256 KiB |
+| 命令 | 自动环境准备总计 300 秒；普通 Shell 60 秒，超时停止容器 |
+| 容器资源 | 2 CPU、4 GiB 内存、最多 512 个进程/线程；工作区、HOME、临时目录为限额 tmpfs |
 | 保存成果 | 最多 256 个事件，每个 32 KiB；报告 64 KiB；Patch 8 MiB |
 
 - 只有可信 Worker 挂载 Docker socket。API 和 Run 容器不挂载；Run 容器没有宿主目录或用户模型/GitHub 凭据，根文件系统只读，并限制 capabilities。
-- 准备命令为空时无外网；准备命令结束后断开网络，再进入模型循环。准备阶段允许第三方脚本联网，不宣称可以防御任意网络攻击；更高隔离需求应使用预装镜像并留空准备命令。
-- 工具为 `read_file`、固定文本 `search`、带已读 hash 校验的 `edit_file`、仅新建的 `write_file` 和 `shell`。整批调用先校验，非法或截断响应不会执行半批工具；未知网络结果不自动重试。
+- 系统自动准备环境时可能联网下载并执行第三方依赖安装脚本，准备完成后断网，再进入模型循环。不注入宿主或用户凭据，也不宣称可以防御任意网络攻击；私有依赖无法读取时明确受阻。
+- 基础工具为 `read_file`、固定文本 `search`、带已读 hash 校验的 `edit_file`、仅新建的 `write_file` 和可指定相对项目根的 `shell`，加上上述语义工具。整批调用先校验，非法或截断响应不会执行半批工具；未知模型网络结果不自动重试。
 - Patch 从控制面基线与最终文件生成，不依赖 Agent 可改写的 `.git`。支持新增、删除、二进制与权限变更；排除未跟踪依赖/缓存产物，基线已有文件始终参与比较。超限不会保存截断的可应用 Patch。
 - 工作台数据和凭据由所有持有访问密钥的成员共享，不是多租户隔离。GitHub token/私钥加密保存；模型 API Key 目前在 PostgreSQL 中为明文，HTTP 响应不回显，需保护数据库及备份。
 - 仅保存可见模型文本，不保存内部思维链。安全校验与固定检查不是独立验收，下载成果后仍应人工审查。
@@ -235,7 +248,7 @@ development-plan/     # 产品规划与架构决策
 | `POST /api/tasks/{id}/goal` | 生成、修改或重试 Goal，携带 `expected_revision` |
 | `POST /api/tasks/{id}/approve` | 批准最新 `goal_version`，携带 `expected_revision` |
 | `GET /api/execution` | 执行镜像默认值 |
-| `POST /api/tasks/{id}/runs` | 显式排队，返回 202；提交版本、镜像和命令 |
+| `POST /api/tasks/{id}/runs` | 显式排队，返回 202；仅提交 `expected_revision`、`goal_version`，环境与检查由系统选择 |
 | `GET /api/tasks/{id}/runs`、`GET /api/tasks/{id}/runs/{run_id}` | 最近 50 条 Run 与单次详情 |
 | `POST /api/tasks/{id}/runs/{run_id}/cancel` | 请求取消 |
 
