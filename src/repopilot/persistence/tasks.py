@@ -302,7 +302,7 @@ class TaskRepository:
             row.approved_at = now
             row.revision += 1
             row.updated_at = now
-            session.add(TaskMessageRow(task_id=row.id, kind="approval", text="目标已批准；开始执行需要单独确认",
+            session.add(TaskMessageRow(task_id=row.id, kind="approval", text="目标已批准；实际执行状态请查看执行记录",
                                        goal_version=goal_version, created_at=now))
             await session.flush()
             return await self._detail(session, row)

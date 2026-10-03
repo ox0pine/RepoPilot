@@ -133,7 +133,7 @@ async function submit(): Promise<void> {
     emit('changed')
   } catch (error) {
     if (!current()) return
-    requestError.value = error instanceof ApiError ? error.message : '连接中断，无法确认对话是否已创建。请先查看最近对话，再决定是否重新提交。'
+    requestError.value = error instanceof ApiError ? error.message : '连接中断，无法确认任务是否已创建。请先查看最近任务，再决定是否重新提交。'
     needsSettings.value = error instanceof ApiError && error.status === 503
     uncertainResult.value = !(error instanceof ApiError) || error.status >= 500 && error.status !== 503
   } finally {
@@ -149,50 +149,50 @@ async function submit(): Promise<void> {
   <section class="new-conversation" aria-labelledby="new-conversation-title">
     <a class="back-link" href="/app" @click="followLink($event, '/app')"><ArrowLeft :size="16" aria-hidden="true" />返回工作台</a>
     <header class="page-header">
-      <p class="eyebrow">从 Issue 到可审阅的代码变更</p>
-      <h1 id="new-conversation-title">新建对话</h1>
-      <p class="description">选择问题与代码版本，先生成目标，再由你决定是否执行。</p>
+      <p class="eyebrow">从 Issue 开始</p>
+      <h1 id="new-conversation-title">新建任务</h1>
+      <p class="description">固定代码版本和 Issue，生成方案并在审阅后执行。</p>
     </header>
     <ol class="creation-steps" aria-label="任务流程">
-      <li aria-current="step"><span class="step-number">1</span><span>固定来源</span></li>
-      <li><span class="step-number">2</span><span>审阅与批准目标</span></li>
-      <li><span class="step-number">3</span><span>执行并审阅变更</span></li>
+      <li aria-current="step"><span class="step-number">1</span><span>确定来源</span></li>
+      <li><span class="step-number">2</span><span>审阅并批准方案</span></li>
+      <li><span class="step-number">3</span><span>执行并交付</span></li>
     </ol>
     <form class="source-form" novalidate :aria-busy="creating" @submit.prevent="submit">
-      <div class="form-intro"><div><h2>对话来源</h2><p>固定仓库、代码版本与 Issue，作为本次任务的共同依据。</p></div><span class="source-badge"><GitBranch :size="14" aria-hidden="true" />GitHub</span></div>
+      <div class="form-intro"><div><h2>任务来源</h2><p>选择仓库、代码版本与 Issue，作为方案和执行的依据。</p></div><span class="source-badge"><GitBranch :size="14" aria-hidden="true" />GitHub</span></div>
       <section v-if="requestError && needsSettings" class="configuration-notice" role="alert" aria-labelledby="configuration-title">
         <CircleAlert :size="20" class="notice-icon" aria-hidden="true" />
-        <div class="notice-content"><h3 id="configuration-title">先完成 GitHub 访问配置</h3><p>{{ requestError }}</p><p class="notice-hint">填写的来源已保留。保存配置后，回到这里重新校验即可。</p></div>
+        <div class="notice-content"><h3 id="configuration-title">需要配置 GitHub 访问权限</h3><p>{{ requestError }}</p><p class="notice-hint">已保留当前填写内容。保存设置后可直接重试。</p></div>
         <NButton attr-type="button" class="settings-button" aria-haspopup="dialog" @click="emit('settings')"><template #icon><Settings :size="16" aria-hidden="true" /></template>打开设置</NButton>
       </section>
       <div class="field">
         <div class="field-heading"><label for="conversation-repository"><GitBranch :size="16" aria-hidden="true" />仓库链接</label><span class="field-tag">HTTPS</span></div>
         <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'conversation-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" @blur="validate('repository_url')" />
-        <p id="repository-help" class="field-help">GitHub 仓库主页地址。读取私有仓库需要相应的 token 权限。</p>
+        <p id="repository-help" class="field-help">GitHub 仓库主页地址。私有仓库需要相应的 GitHub token 权限。</p>
         <p v-if="errors.repository_url" id="repository-error" class="field-error" role="alert">{{ errors.repository_url }}</p>
       </div>
       <div class="field">
         <div class="field-heading"><label for="conversation-commit"><GitCommitHorizontal :size="16" aria-hidden="true" />代码版本</label><span class="field-tag">完整 commit SHA</span></div>
         <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="粘贴 40 位 commit SHA" :input-props="{ id: 'conversation-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
-        <p id="commit-help" class="field-help">从仓库的提交页面复制完整 SHA，不使用分支名或短 SHA。每次执行均从此版本开始。</p>
+        <p id="commit-help" class="field-help">填写完整 commit SHA。任务每次执行都从此版本重新开始。</p>
         <p v-if="errors.baseline_commit" id="commit-error" class="field-error" role="alert">{{ errors.baseline_commit }}</p>
       </div>
       <div class="field">
         <div class="field-heading"><label for="conversation-issue"><Link :size="16" aria-hidden="true" />Issue 链接</label><span class="field-tag">同一仓库</span></div>
         <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'conversation-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" @blur="validate('issue_url')" />
-        <p id="issue-help" class="field-help">使用上述仓库的 Issue，不支持 Pull Request。更换来源需新建对话。</p>
+        <p id="issue-help" class="field-help">Issue 必须属于上述仓库，暂不支持 Pull Request。更换来源请新建任务。</p>
         <p v-if="errors.issue_url" id="issue-error" class="field-error" role="alert">{{ errors.issue_url }}</p>
       </div>
-      <NAlert v-if="requestError && !needsSettings" type="error" :show-icon="true" role="alert" class="request-error" title="暂时无法创建对话">
+      <NAlert v-if="requestError && !needsSettings" type="error" :show-icon="true" role="alert" class="request-error" title="暂时无法创建任务">
         {{ requestError }}
-        <p v-if="uncertainResult" class="error-guidance">不会自动重新提交。可返回工作台刷新最近对话，避免重复创建。</p>
-        <a v-if="uncertainResult" class="back-link" href="/app" @click="followLink($event, '/app')">查看最近对话</a>
+        <p v-if="uncertainResult" class="error-guidance">系统不会自动重试。请先返回工作台查看最近任务，避免重复创建。</p>
+        <a v-if="uncertainResult" class="back-link" href="/app" @click="followLink($event, '/app')">查看最近任务</a>
       </NAlert>
       <footer class="form-footer">
-        <div class="creation-note"><ShieldCheck :size="18" aria-hidden="true" /><p>创建时读取 Issue 和有限源码上下文。<br><span>仅生成目标，不会自动执行或修改代码。</span></p></div>
-        <NButton type="primary" attr-type="submit" class="submit-button" :loading="creating" :disabled="creating"><template #icon><ArrowRight v-if="!creating" :size="17" aria-hidden="true" /></template>{{ creating ? '正在校验来源' : needsSettings ? '重新校验并生成目标' : '创建并生成目标' }}</NButton>
+        <div class="creation-note"><ShieldCheck :size="18" aria-hidden="true" /><p>创建任务时会读取 Issue 和必要的源码。<br><span>此步骤仅生成方案，不会修改代码。</span></p></div>
+        <NButton type="primary" attr-type="submit" class="submit-button" :loading="creating" :disabled="creating"><template #icon><ArrowRight v-if="!creating" :size="17" aria-hidden="true" /></template>{{ creating ? '正在检查任务来源' : needsSettings ? '重新检查并生成方案' : '创建任务并生成方案' }}</NButton>
       </footer>
-      <p class="submission-status" role="status" aria-live="polite">{{ creating ? '正在校验仓库、commit 与 Issue，请稍候。' : '' }}</p>
+      <p class="submission-status" role="status" aria-live="polite">{{ creating ? '正在检查仓库、commit 与 Issue…' : '' }}</p>
     </form>
   </section>
 </template>

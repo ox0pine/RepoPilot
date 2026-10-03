@@ -84,10 +84,10 @@ async function load(): Promise<void> {
     if (!settings.api_token_configured) tokenEditing.value = true
     if (wasUncertain) {
       saveError.value = ''
-      saveNotice.value = '已重新读取服务器配置。无法判断草稿是否已保存；草稿仍保留，可明确选择再次保存。'
+      saveNotice.value = '已重新读取服务器配置，但无法确认上次保存是否成功。草稿仍保留；确认当前状态后再保存。'
     }
   } catch (cause) {
-    if (isCurrent()) loadError.value = cause instanceof Error ? cause.message : '无法加载 GitHub 设置'
+    if (isCurrent()) loadError.value = cause instanceof Error ? cause.message : '无法读取 GitHub 配置，请重试。'
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -110,12 +110,12 @@ async function save(): Promise<void> {
     tokenEditing.value = false
     authorizationError.value = ''
     authorizationNotice.value = ''
-    saveNotice.value = 'Token 已保存。本次保存未验证仓库访问权限，也未执行 SSH 公钥授权。'
+    saveNotice.value = 'Token 已保存。SSH 公钥仍需单独注册。'
   } catch (cause) {
     if (!isCurrent()) return
     saveUncertain.value = !(cause instanceof ApiError) || cause.status >= 500 || cause.status < 400
-    saveError.value = cause instanceof Error ? cause.message : '保存失败'
-    if (saveUncertain.value) saveNotice.value = '无法确认此次保存结果。草稿已保留，请先重新读取配置；不会自动重新提交。'
+    saveError.value = cause instanceof Error ? cause.message : '无法保存 token，请检查后重试。'
+    if (saveUncertain.value) saveNotice.value = '无法确认保存结果。请先重新读取配置；系统不会自动重试。'
   } finally {
     if (isCurrent()) {
       saving.value = false
@@ -136,16 +136,16 @@ async function authorize(): Promise<void> {
     const result = await authorizeGitHubSettings(beginRequest())
     if (!isCurrent()) return
     if (result.registration.public_key !== saved.value?.public_key || result.settings.public_key !== saved.value?.public_key) {
-      authorizationError.value = '服务器公钥与当前显示的配置不同，请重新读取配置后核对。'
+      authorizationError.value = '服务器返回的公钥与当前配置不一致。请重新读取配置后核对。'
       loadError.value = authorizationError.value
       loaded.value = false
       return
     }
     authorizationNotice.value = result.registration.status === 'created'
-      ? 'SSH 公钥已添加到 GitHub。此结果不代表仓库读取权限已验证。'
-      : 'GitHub 已有此 SSH 公钥。此结果不代表仓库读取权限已验证。'
+      ? 'SSH 公钥已注册到 GitHub。'
+      : '此 SSH 公钥已在 GitHub 注册。'
   } catch (cause) {
-    if (isCurrent()) authorizationError.value = `${cause instanceof Error ? cause.message : 'SSH 公钥授权失败'}。本操作不会更改已保存的 token；可在 GitHub 核对公钥后手动重试。`
+    if (isCurrent()) authorizationError.value = `${cause instanceof Error ? cause.message : '无法注册 SSH 公钥'}。结果可能尚未确认；请先在 GitHub 核对，系统不会自动重试。`
   } finally {
     if (isCurrent()) authorizing.value = false
   }
@@ -159,7 +159,7 @@ async function copyPublicKey(): Promise<void> {
     await navigator.clipboard.writeText(publicKey)
     if (isCurrent() && saved.value?.public_key === publicKey) copyNotice.value = '公钥已复制'
   } catch {
-    if (isCurrent()) copyNotice.value = '无法访问剪贴板，请选中公钥手动复制。'
+    if (isCurrent()) copyNotice.value = '无法复制，请手动选择公钥。'
   }
 }
 
@@ -176,26 +176,26 @@ onBeforeUnmount(() => {
   <section class="github-settings" aria-labelledby="github-settings-title">
     <header class="section-heading">
       <h2 id="github-settings-title"><GitBranch :size="22" aria-hidden="true" /> GitHub</h2>
-      <p>配置仓库来源访问与修复分支提交权限，用于读取 commit 和 Issue，并在用户显式操作后向自己的仓库推送唯一分支。</p>
+      <p>配置仓库读取与修复分支交付所需的 GitHub 凭据。</p>
     </header>
 
     <div v-if="loading" class="loading-state" role="status"><NSpin size="small" /> 正在读取 GitHub 配置…</div>
     <NAlert v-if="loadError" type="error" role="alert" class="feedback">{{ loadError }}</NAlert>
-    <NButton v-if="loadError || (!loaded && !loading)" :disabled="busy || loading" @click="load">重新读取配置</NButton>
+    <NButton v-if="loadError || (!loaded && !loading)" :disabled="busy || loading" @click="load">重新读取</NButton>
 
     <template v-if="loaded && saved">
       <section class="settings-card" aria-labelledby="repository-access-title">
         <div class="card-heading">
-          <div><h3 id="repository-access-title">仓库访问</h3><p class="help">保存凭据，不自动授权 SSH。</p></div>
-          <NTag :bordered="false" :type="saved.api_token_configured ? 'success' : 'default'">{{ saved.api_token_configured ? '凭据已保存' : '未配置' }}</NTag>
+          <div><h3 id="repository-access-title">访问凭据</h3><p class="help">Token 用于访问 GitHub API、读取来源信息和推送修复分支。</p></div>
+          <NTag :bordered="false" :type="saved.api_token_configured ? 'success' : 'default'">{{ saved.api_token_configured ? 'Token 已保存' : '未配置' }}</NTag>
         </div>
 
         <div v-if="saved.api_token_configured && !tokenEditing" class="credential-summary">
-          <div><strong>GitHub API token</strong><p class="help">已加密保存；仓库读取权限将在创建对话时校验，分支写权限仅在显式提交修复分支时校验。</p></div>
+          <div><strong>GitHub token</strong><p class="help">已加密保存，不会回显。</p></div>
           <NButton ref="replaceButton" :disabled="busy || loading" @click="editToken">更换 token</NButton>
         </div>
         <NForm v-else label-placement="top" @submit.prevent="save">
-          <NFormItem :label="saved.api_token_configured ? '新的 GitHub API token' : 'GitHub API token'" :label-props="{ for: 'github-api-token' }">
+          <NFormItem :label="saved.api_token_configured ? '新的 GitHub token' : 'GitHub token'" :label-props="{ for: 'github-api-token' }">
             <NInput ref="tokenInput" v-model:value="apiToken" type="password" show-password-on="click" :maxlength="4096" :disabled="busy || loading" :input-props="{ id: 'github-api-token', autocomplete: 'new-password', spellcheck: false }" placeholder="粘贴 GitHub Personal Access Token" />
           </NFormItem>
           <div class="actions">
@@ -206,33 +206,33 @@ onBeforeUnmount(() => {
 
         <NAlert v-if="saveError" type="error" role="alert" class="feedback">{{ saveError }}</NAlert>
         <NAlert v-if="saveNotice" :type="saveUncertain ? 'warning' : 'info'" role="status" class="feedback">{{ saveNotice }}</NAlert>
-        <NButton v-if="saveUncertain" :disabled="loading || busy" @click="load">重新读取配置，确认保存状态</NButton>
+        <NButton v-if="saveUncertain" :disabled="loading || busy" @click="load">重新读取并确认</NButton>
 
         <div class="permission-guide">
-          <h4>创建 token 时，选择需要访问的仓库</h4>
-          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，在 Repository permissions 中为来源读取开启以下权限；若要提交修复分支，将 Contents 提升为 Read and write：</p>
-          <div class="permission-list"><span>Contents <strong>Read-only / 分支交付需 Read and write</strong></span><span>Issues <strong>Read-only</strong></span></div>
-          <p class="help">分支交付仅允许 token 所属用户自己的仓库，不自动创建 PR 或合并。组织仓库可能需要管理员批准。</p>
-          <details class="classic-guide"><summary>使用 Classic token？</summary><p class="help"><a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">Classic token</a> 读取或写入私有仓库通常需要 <strong>repo</strong> scope，包含广泛权限。建议优先使用上述限定仓库的 Fine-grained token。</p></details>
+          <h4>授予所需仓库权限</h4>
+          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，仅选择你自己的目标仓库，并设置：</p>
+          <div class="permission-list"><span>Contents <strong>读取；交付分支需读写</strong></span><span>Issues <strong>只读</strong></span></div>
+          <p class="help">修复分支只能推送到 token 所属用户自己的仓库。推送后仍需你在 GitHub 审查并手动合并。</p>
+          <details class="classic-guide"><summary>使用 Classic token</summary><p class="help">私有仓库通常需要 <strong>repo</strong> scope，权限范围更广。建议优先使用限定仓库的 Fine-grained token。</p></details>
         </div>
-        <p class="help privacy-note">工作台共享配置。关闭设置或切换分类会丢弃未保存的草稿。</p>
+        <p class="help privacy-note">配置由整个工作台共享，凭据不会传入代码执行环境。关闭设置会丢弃未保存的修改。</p>
       </section>
 
       <NCollapse class="advanced-settings">
-        <NCollapseItem title="高级 · SSH 公钥（可选）" name="ssh">
+        <NCollapseItem title="SSH 公钥" name="ssh">
           <section class="settings-card advanced-card" aria-labelledby="ssh-settings-title">
-            <h3 id="ssh-settings-title"><KeyRound :size="18" aria-hidden="true" /> SSH 公钥授权</h3>
-            <p class="help">生成目标通过 GitHub API 读取来源，<strong>不需要 SSH 授权</strong>。只有需要通过 SSH 访问 GitHub 时，才执行此操作。</p>
-            <p class="help">{{ saved.public_key && saved.private_key_configured ? '本地密钥对已生成并保存，私钥不会上传；这不代表公钥已获 GitHub 授权。' : '保存 token 时会生成本地密钥对，已有密钥会复用。' }}</p>
+            <h3 id="ssh-settings-title"><KeyRound :size="18" aria-hidden="true" /> SSH 克隆</h3>
+            <p class="help">保存 token 时会生成 SSH 密钥对，后续克隆使用此密钥。首次执行前，请将公钥添加到 GitHub；保存 token 不会自动注册公钥。</p>
+            <p class="help">{{ saved.public_key && saved.private_key_configured ? '本地密钥对已保存。请确认公钥已在 GitHub 注册。' : '保存 token 后会生成本地密钥对。' }}</p>
             <template v-if="saved.public_key">
-              <p class="key-label">本地生成的公钥</p>
+              <p class="key-label">SSH 公钥</p>
               <pre class="public-key" tabindex="0" aria-label="SSH 公钥">{{ saved.public_key }}</pre>
               <NButton :disabled="busy || loading" @click="copyPublicKey"><template #icon><Copy :size="16" aria-hidden="true" /></template>复制公钥</NButton>
               <p v-if="copyNotice" class="help" role="status">{{ copyNotice }}</p>
             </template>
-            <p class="help">如需授权，已保存的 fine-grained token 还需 Account permissions → <strong>Git SSH keys: Read and write</strong>；classic token 需要 <strong>read:public_key</strong> 和 <strong>write:public_key</strong>。这些额外权限不是生成目标的前置条件。</p>
-            <p v-if="tokenEditing || saveUncertain" class="help">请先保存或取消 token 草稿；保存结果不明确时，先重新读取配置，再授权公钥。</p>
-            <div class="ssh-actions"><NButton :disabled="!canAuthorize" :loading="authorizing" @click="authorize">{{ authorizing ? '正在授权公钥…' : '将已保存公钥授权到 GitHub' }}</NButton><a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">在 GitHub 查看公钥</a></div>
+            <p class="help">通过此处注册，需要 Fine-grained token 的 Account permissions → <strong>Git SSH keys: Read and write</strong>；Classic token 需要 <strong>read:public_key</strong> 和 <strong>write:public_key</strong>。</p>
+            <p v-if="tokenEditing || saveUncertain" class="help">请先保存或取消 token 修改；保存结果不明确时，先重新读取配置。</p>
+            <div class="ssh-actions"><NButton :disabled="!canAuthorize" :loading="authorizing" @click="authorize">{{ authorizing ? '正在注册…' : '将公钥注册到 GitHub' }}</NButton><a href="https://github.com/settings/keys" target="_blank" rel="noopener noreferrer">在 GitHub 管理公钥</a></div>
             <NAlert v-if="authorizationError" type="error" role="alert" class="feedback">{{ authorizationError }}</NAlert>
             <NAlert v-if="authorizationNotice" type="success" role="status" class="feedback">{{ authorizationNotice }}</NAlert>
           </section>

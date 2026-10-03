@@ -14,7 +14,7 @@ const menuButton = ref<HTMLButtonElement | null>(null)
 let pendingSettings = false
 const media = window.matchMedia('(max-width: 768px)')
 const statusLabels: Record<TaskSummary['status'], string> = {
-  draft: '待生成', generating: '生成中', awaiting_approval: '待批准',
+  draft: '待生成方案', generating: '方案生成中', awaiting_approval: '待批准',
   approved: '已批准', generation_failed: '生成失败',
 }
 function repositoryName(url: string): string {
@@ -49,22 +49,22 @@ onUnmounted(() => media.removeEventListener('change', onMediaChange))
 <template>
   <header v-if="mobile" class="mobile-topbar">
     <BrandMark />
-    <a class="new-link mobile-new" href="/app/new" @click="selectLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建</a>
+    <a class="new-link mobile-new" href="/app/new" @click="selectLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建任务</a>
     <button ref="menuButton" class="menu-button" type="button" aria-label="打开工作台菜单" aria-haspopup="dialog" :aria-expanded="drawerOpen" @click="drawerOpen = true"><Menu :size="22" aria-hidden="true" /></button>
   </header>
   <component :is="mobile ? NDrawer : 'aside'" :class="mobile ? undefined : 'sidebar'" :show="drawerOpen" placement="left" width="min(320px, calc(100vw - 24px))" :trap-focus="true" :close-on-esc="true" @update:show="drawerOpen = $event" @after-leave="afterDrawerLeave">
     <component :is="mobile ? NDrawerContent : 'div'" :class="mobile ? undefined : 'sidebar-content'" :native-scrollbar="true" :body-content-style="{ display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box', padding: '24px 16px', overflow: 'hidden' }" :closable="mobile" title="工作台菜单">
       <div class="brand"><BrandMark /></div>
       <nav class="sidebar-nav" aria-label="工作台导航">
-        <a class="new-link" href="/app/new" :aria-current="route === '/app/new' ? 'page' : undefined" @click="selectLink($event, '/app/new')"><Plus :size="20" :stroke-width="1.75" aria-hidden="true" />新建对话</a>
+        <a class="new-link" href="/app/new" :aria-current="route === '/app/new' ? 'page' : undefined" @click="selectLink($event, '/app/new')"><Plus :size="20" :stroke-width="1.75" aria-hidden="true" />新建任务</a>
         <a class="dashboard-link" :class="{ selected: route === '/app' }" href="/app" :aria-current="route === '/app' ? 'page' : undefined" @click="selectLink($event, '/app')"><LayoutDashboard :size="20" :stroke-width="1.75" aria-hidden="true" />工作台</a>
       </nav>
       <section class="recent-section" aria-labelledby="sidebar-recent-title">
-        <h2 id="sidebar-recent-title">最近对话</h2>
+        <h2 id="sidebar-recent-title">最近任务</h2>
         <div class="recent-scroll">
-          <div v-if="taskStore.listLoading && !taskStore.items.length" class="list-skeleton" role="status" aria-label="正在加载最近对话"><NSkeleton v-for="index in 4" :key="index" height="58px" :sharp="false" /></div>
-          <p v-else-if="!taskStore.items.length && !taskStore.listError" class="empty-note">暂无对话，创建一个开始吧。</p>
-          <nav v-if="taskStore.items.length" class="recent-list" aria-label="最近对话">
+          <div v-if="taskStore.listLoading && !taskStore.items.length" class="list-skeleton" role="status" aria-label="正在加载最近任务"><NSkeleton v-for="index in 4" :key="index" height="58px" :sharp="false" /></div>
+          <p v-else-if="!taskStore.items.length && !taskStore.listError" class="empty-note">暂无任务，从新建任务开始。</p>
+          <nav v-if="taskStore.items.length" class="recent-list" aria-label="最近任务">
             <a v-for="task in taskStore.items" :key="task.id" class="conversation-link" :class="{ selected: route === `/app/tasks/${task.id}` }" :href="`/app/tasks/${task.id}`" :aria-current="route === `/app/tasks/${task.id}` ? 'page' : undefined" :title="task.title" @click="selectLink($event, `/app/tasks/${task.id}`)">
               <span class="conversation-title">{{ task.title }}</span>
               <span class="conversation-meta"><span class="repository-name">{{ repositoryName(task.repository_url) }}</span><span class="status-label" :class="task.status">{{ statusLabels[task.status] }}</span></span>

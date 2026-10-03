@@ -31,6 +31,6 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     const detail = typeof payload === 'object' && payload !== null && 'detail' in payload && typeof payload.detail === 'string' ? payload.detail : '请求失败'
     throw new ApiError(detail, response.status)
   }
-  if (payload === null) throw new ApiError('服务端返回了无效响应', response.status)
+  if (payload === null) throw new ApiError('暂时无法读取结果，请刷新后重试', response.status)
   return payload as T
 }

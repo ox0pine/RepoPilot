@@ -8,14 +8,14 @@ import type { TaskSummary } from '../api/tasks'
 
 const emit = defineEmits<{ settings: [] }>()
 const cards = computed(() => [
-  { label: '全部对话', value: taskStore.stats?.total, icon: MessagesSquare, tone: 'default' },
-  { label: '待批准目标', value: taskStore.stats?.awaiting_approval, icon: Target, tone: 'warning' },
-  { label: '已批准目标', value: taskStore.stats?.approved, icon: CheckCircle2, tone: 'success' },
-  { label: '生成失败', value: taskStore.stats?.generation_failed, icon: CircleAlert, tone: 'danger' },
+  { label: '全部任务', value: taskStore.stats?.total, icon: MessagesSquare, tone: 'default' },
+  { label: '待批准方案', value: taskStore.stats?.awaiting_approval, icon: Target, tone: 'warning' },
+  { label: '已批准方案', value: taskStore.stats?.approved, icon: CheckCircle2, tone: 'success' },
+  { label: '方案生成失败', value: taskStore.stats?.generation_failed, icon: CircleAlert, tone: 'danger' },
 ])
 const recentTasks = computed(() => taskStore.items.slice(0, 5))
 const statusLabels: Record<TaskSummary['status'], string> = {
-  draft: '待生成', generating: '生成中', awaiting_approval: '待批准',
+  draft: '待生成方案', generating: '方案生成中', awaiting_approval: '待批准',
   approved: '已批准', generation_failed: '生成失败',
 }
 function repositoryName(url: string): string {
@@ -29,11 +29,11 @@ function formatDate(value: string): string {
 <template>
   <div class="dashboard">
     <header class="dashboard-header">
-      <div><p class="eyebrow">RepoPilot</p><h1>工作台</h1><p class="description">从 Issue 开始，生成目标并完成人工审批。</p></div>
-      <a class="new-link" href="/app/new" @click="followLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建对话</a>
+      <div><p class="eyebrow">RepoPilot</p><h1>工作台</h1><p class="description">查看任务进度，或从新的 Issue 开始。</p></div>
+      <a class="new-link" href="/app/new" @click="followLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建任务</a>
     </header>
-    <section aria-label="对话统计" class="stats-section" :aria-busy="taskStore.statsLoading">
-      <div v-if="taskStore.statsError" class="error-state" role="alert"><div><h2>统计暂时无法读取</h2><p>{{ taskStore.statsError }}</p></div><NButton :loading="taskStore.statsLoading" @click="refreshTasks">重试</NButton></div>
+    <section aria-label="任务统计" class="stats-section" :aria-busy="taskStore.statsLoading">
+      <div v-if="taskStore.statsError" class="error-state" role="alert"><div><h2>暂时无法加载任务统计</h2><p>{{ taskStore.statsError }}</p></div><NButton :loading="taskStore.statsLoading" @click="refreshTasks">重试</NButton></div>
       <div v-else class="stats-grid">
         <article v-for="card in cards" :key="card.label" class="stat-card">
           <div class="stat-heading"><h2>{{ card.label }}</h2><span class="stat-icon" :class="card.tone"><component :is="card.icon" :size="20" :stroke-width="1.75" aria-hidden="true" /></span></div>
@@ -44,13 +44,13 @@ function formatDate(value: string): string {
     </section>
     <section class="preparation-card" aria-labelledby="preparation-title">
       <span class="preparation-icon"><Settings :size="22" :stroke-width="1.75" aria-hidden="true" /></span>
-      <div><h2 id="preparation-title">模型与 GitHub 配置</h2><p>生成目标需要可用的模型服务与 GitHub 访问权限，可在设置中查看或调整。</p></div>
+      <div><h2 id="preparation-title">模型与 GitHub 配置</h2><p>生成方案和读取仓库需要可用的模型服务与 GitHub 访问权限。</p></div>
       <NButton class="settings-button" attr-type="button" aria-haspopup="dialog" @click="emit('settings')">打开设置</NButton>
     </section>
     <section class="recent-card" aria-labelledby="dashboard-recent-title" :aria-busy="taskStore.listLoading">
-      <header class="section-header"><h2 id="dashboard-recent-title">最近对话</h2><span>最近更新的 5 条</span></header>
-      <div v-if="taskStore.listLoading && !recentTasks.length" class="recent-skeleton" role="status" aria-label="正在加载最近对话"><NSkeleton v-for="index in 3" :key="index" height="64px" :sharp="false" /></div>
-      <div v-if="taskStore.listError" class="error-state recent-error" role="alert"><div><h3>最近对话暂时无法读取</h3><p>{{ taskStore.listError }}</p></div><NButton :loading="taskStore.listLoading" @click="refreshTasks">重试</NButton></div>
+      <header class="section-header"><h2 id="dashboard-recent-title">最近任务</h2><span>最近更新的 5 项</span></header>
+      <div v-if="taskStore.listLoading && !recentTasks.length" class="recent-skeleton" role="status" aria-label="正在加载最近任务"><NSkeleton v-for="index in 3" :key="index" height="64px" :sharp="false" /></div>
+      <div v-if="taskStore.listError" class="error-state recent-error" role="alert"><div><h3>暂时无法加载最近任务</h3><p>{{ taskStore.listError }}</p></div><NButton :loading="taskStore.listLoading" @click="refreshTasks">重试</NButton></div>
       <div v-if="recentTasks.length" class="recent-list">
         <a v-for="task in recentTasks" :key="task.id" class="recent-row" :href="`/app/tasks/${task.id}`" @click="followLink($event, `/app/tasks/${task.id}`)">
           <span class="task-copy"><span class="task-title" :title="task.title">{{ task.title }}</span><span class="task-repository">{{ repositoryName(task.repository_url) }}</span></span>
@@ -59,9 +59,9 @@ function formatDate(value: string): string {
           <ArrowUpRight class="row-arrow" :size="18" aria-hidden="true" />
         </a>
       </div>
-      <div v-else-if="!taskStore.listLoading && !taskStore.listError" class="empty-state"><MessagesSquare :size="32" :stroke-width="1.5" aria-hidden="true" /><h3>还没有对话</h3><p>填写仓库、commit 和 Issue，开始审阅你的第一个目标。</p><a class="new-link" href="/app/new" @click="followLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建对话</a></div>
+      <div v-else-if="!taskStore.listLoading && !taskStore.listError" class="empty-state"><MessagesSquare :size="32" :stroke-width="1.5" aria-hidden="true" /><h3>还没有任务</h3><p>选择仓库、commit 和 Issue，创建第一项任务。</p><a class="new-link" href="/app/new" @click="followLink($event, '/app/new')"><Plus :size="18" aria-hidden="true" />新建任务</a></div>
     </section>
-    <p class="scope-note">批准仅确认目标，不会自动执行代码。请在对话页单独开始执行，并审阅检查记录、报告和 Patch。</p>
+    <p class="scope-note">批准方案后会立即开始执行。请审阅代码变更和执行记录；推送修复分支需单独确认，并由你在 GitHub 手动合并。</p>
   </div>
 </template>
 

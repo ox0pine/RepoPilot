@@ -36,7 +36,7 @@ async function load(): Promise<void> {
     loaded.value = true
     if (settings.value.model) models.value = [settings.value.model]
   } catch (cause) {
-    if (active) error.value = cause instanceof Error ? cause.message : '无法加载设置'
+    if (active) error.value = cause instanceof Error ? cause.message : '无法读取模型设置，请重试。'
   } finally {
     if (active) loading.value = false
   }
@@ -64,12 +64,12 @@ async function refresh(): Promise<void> {
     if (!active || sequence !== refreshSequence || baseUrl !== settings.value.base_url.trim() || key !== apiKey.value) return
     models.value = result.models
     if (!models.value.includes(settings.value.model)) settings.value.model = ''
-    notice.value = result.models.length ? `已发现 ${result.models.length} 个模型` : '端点可访问，但没有返回模型'
+    notice.value = result.models.length ? `已获取 ${result.models.length} 个模型` : '服务已连接，但未返回可用模型。'
   } catch (cause) {
     if (sequence === refreshSequence) {
       models.value = []
       settings.value.model = ''
-      error.value = cause instanceof Error ? cause.message : '模型刷新失败'
+      error.value = cause instanceof Error ? cause.message : '无法获取模型。请检查服务地址和访问密钥。'
     }
   } finally {
     if (sequence === refreshSequence) refreshing.value = false
@@ -93,9 +93,9 @@ async function save(): Promise<void> {
     apiKey.value = ''
     apiKeyEditing.value = false
     if (saved.model && !models.value.includes(saved.model)) models.value.unshift(saved.model)
-    notice.value = '模型设置已保存'
+    notice.value = '模型设置已保存。'
   } catch (cause) {
-    if (active) error.value = cause instanceof Error ? cause.message : '保存失败'
+    if (active) error.value = cause instanceof Error ? cause.message : '无法保存模型设置，请检查后重试。'
   } finally {
     if (active) saving.value = false
   }
@@ -124,30 +124,29 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
 
 <template>
   <section class="panel" aria-labelledby="model-settings-title">
-    <div class="panel-heading"><h2 id="model-settings-title">模型服务</h2><p class="description">连接 OpenAI 兼容服务，用于生成和修改目标。</p></div>
-    <div v-if="loading" role="status"><NSpin size="small" /> 正在加载设置…</div>
+    <div class="panel-heading"><h2 id="model-settings-title">模型服务</h2><p class="description">选择用于生成方案和代码变更的模型。</p></div>
+    <div v-if="loading" role="status"><NSpin size="small" /> 正在读取模型设置…</div>
     <NAlert v-if="error" type="error" role="alert" class="feedback">{{ error }}</NAlert>
     <NAlert v-if="notice" type="info" role="status" class="feedback">{{ notice }}</NAlert>
-    <NButton v-if="!loading && !loaded" attr-type="button" :disabled="loading" @click="load">重试加载</NButton>
+    <NButton v-if="!loading && !loaded" attr-type="button" :disabled="loading" @click="load">重新读取</NButton>
     <NForm v-if="loaded" label-placement="top" @submit.prevent="save">
       <section class="settings-card" aria-labelledby="connection-title">
-        <div class="card-heading"><span class="card-icon"><Server :size="19" aria-hidden="true" /></span><div><h3 id="connection-title">连接信息</h3><p class="help">填写服务地址及该服务的访问密钥</p></div></div>
+        <div class="card-heading"><span class="card-icon"><Server :size="19" aria-hidden="true" /></span><div><h3 id="connection-title">服务连接</h3><p class="help">输入服务地址和访问密钥。</p></div></div>
         <NFormItem label="服务地址" :label-props="{ for: 'base-url' }">
-          <div class="field-content"><NInput :value="settings.base_url" :disabled="saving" :input-props="{ id: 'base-url', autocomplete: 'url', spellcheck: false }" placeholder="https://api.openai.com/v1" @update:value="settings.base_url = $event" /><p class="help">使用 API 基础地址，通常以 <code>/v1</code> 结尾。</p></div>
+          <div class="field-content"><NInput :value="settings.base_url" :disabled="saving" :input-props="{ id: 'base-url', autocomplete: 'url', spellcheck: false }" placeholder="https://api.openai.com/v1" @update:value="settings.base_url = $event" /><p class="help">填写 OpenAI 兼容服务的基础地址，通常以 <code>/v1</code> 结尾。</p></div>
         </NFormItem>
-        <div v-if="usingSavedKey && !apiKeyEditing" class="saved-key"><KeyRound :size="18" aria-hidden="true" /><div><strong>API Key 已保存</strong><p class="help">密钥不会回显，当前端点继续使用已保存的密钥。</p></div><NButton ref="changeKeyButton" attr-type="button" :disabled="saving" @click="startApiKeyEdit">更换</NButton></div>
+        <div v-if="usingSavedKey && !apiKeyEditing" class="saved-key"><KeyRound :size="18" aria-hidden="true" /><div><strong>API Key 已保存</strong><p class="help">密钥不会回显。</p></div><NButton ref="changeKeyButton" attr-type="button" :disabled="saving" @click="startApiKeyEdit">更换</NButton></div>
         <NFormItem v-else label="API Key" :label-props="{ for: 'api-key' }">
-          <div class="field-content"><NInput ref="keyInput" v-model:value="apiKey" type="password" show-password-on="click" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false }" placeholder="输入密钥；免密服务可留空" /><div class="key-help"><p class="help">{{ usingSavedKey ? '留空会保留原密钥。取消可恢复已保存的模型。' : '更换服务地址后，不会沿用原服务的密钥。' }}</p><NButton v-if="usingSavedKey && apiKeyEditing" text attr-type="button" :disabled="saving" @click="cancelApiKeyEdit">取消更换</NButton></div></div>
+          <div class="field-content"><NInput ref="keyInput" v-model:value="apiKey" type="password" show-password-on="click" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false }" placeholder="输入访问密钥；免密服务可留空" /><div class="key-help"><p class="help">{{ usingSavedKey ? '留空将保留当前密钥。' : '密钥仅用于当前服务；免密服务可留空。' }}</p><NButton v-if="usingSavedKey && apiKeyEditing" text attr-type="button" :disabled="saving" @click="cancelApiKeyEdit">取消更换</NButton></div></div>
         </NFormItem>
       </section>
       <section class="settings-card" aria-labelledby="selection-title">
-        <div class="card-heading"><span class="card-icon"><Check :size="19" aria-hidden="true" /></span><div><h3 id="selection-title">选择模型</h3><p class="help">从当前端点读取可用模型，再保存设置</p></div></div>
-        <NFormItem label="当前模型" :label-props="{ id: 'model-label', for: 'model' }">
-          <div class="model-row"><NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="请先获取模型列表" @update:value="settings.model = $event ?? ''" /><NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="16" aria-hidden="true" /></template>获取模型</NButton></div>
+        <div class="card-heading"><span class="card-icon"><Check :size="19" aria-hidden="true" /></span><div><h3 id="selection-title">选择模型</h3><p class="help">先获取模型列表，再选择并保存。</p></div></div>
+        <NFormItem label="模型" :label-props="{ id: 'model-label', for: 'model' }">
+          <div class="model-row"><NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="请先获取模型" @update:value="settings.model = $event ?? ''" /><NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="16" aria-hidden="true" /></template>获取模型</NButton></div>
         </NFormItem>
-        <p class="help">只读取模型列表，不会发起目标生成。</p>
       </section>
-      <div class="actions"><p class="help">设置对整个工作台生效</p><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存模型设置</NButton></div>
+      <div class="actions"><p class="help">设置由整个工作台共享。</p><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存模型设置</NButton></div>
     </NForm>
   </section>
 </template>

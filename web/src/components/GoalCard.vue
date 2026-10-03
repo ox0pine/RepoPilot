@@ -16,39 +16,39 @@ const props = defineProps<{
 const emit = defineEmits<{ approve: []; revise: [] }>()
 const sections = computed(() => [
   { title: '修改范围', items: props.goal.content.scope },
-  { title: '不包含', items: props.goal.content.non_goals },
+  { title: '本次不做', items: props.goal.content.non_goals },
   { title: '验收标准', items: props.goal.content.acceptance_criteria },
-  { title: '建议执行计划', items: props.goal.content.plan },
+  { title: '实施步骤', items: props.goal.content.plan },
 ])
 </script>
 
 <template>
-  <article class="goal-card" :aria-label="`目标版本 ${goal.version}${current ? '，当前版本' : '，历史版本'}`">
+  <article class="goal-card" :aria-label="`方案版本 ${goal.version}${current ? '，当前版本' : '，历史版本'}`">
     <header class="goal-heading">
-      <span class="goal-title"><Target :size="18" aria-hidden="true" />目标 v{{ goal.version }}</span>
-      <span class="version-label">{{ current ? '当前版本' : '历史版本 · 不可批准' }}</span>
+      <span class="goal-title"><Target :size="18" aria-hidden="true" />方案 v{{ goal.version }}</span>
+      <span class="version-label">{{ current ? '当前版本' : '历史版本' }}</span>
       <span v-if="approved" class="approved-label">已批准</span>
     </header>
     <div class="goal-content">
-      <p class="draft-note">请结合来源卡中的已读文件和覆盖说明审阅；计划尚未经执行验证。</p>
-      <section><h3>目标</h3><p class="goal-summary">{{ goal.content.summary }}</p></section>
+      <p class="draft-note">确认修改范围和验收标准后，再批准执行。</p>
+      <section><h3>方案概述</h3><p class="goal-summary">{{ goal.content.summary }}</p></section>
       <section v-for="section in sections" :key="section.title">
         <h3>{{ section.title }}</h3>
-        <ol v-if="section.title === '建议执行计划' && section.items.length"><li v-for="(item, index) in section.items" :key="index">{{ item }}</li></ol>
+        <ol v-if="section.title === '实施步骤' && section.items.length"><li v-for="(item, index) in section.items" :key="index">{{ item }}</li></ol>
         <ul v-else-if="section.items.length"><li v-for="(item, index) in section.items" :key="index">{{ item }}</li></ul>
-        <p v-else class="empty-section">未列出</p>
+        <p v-else class="empty-section">暂无</p>
       </section>
       <section v-if="goal.content.open_questions.length" class="question-warning">
         <h3><CircleAlert :size="17" aria-hidden="true" />待确认事项</h3>
-        <p>以下问题仍需确认。批准目标不代表已解决执行前置条件。</p>
+        <p>请先确认以下问题；需要补充信息时，可提出修改。</p>
         <ul><li v-for="(question, index) in goal.content.open_questions" :key="index">{{ question }}</li></ul>
       </section>
       <section v-else><h3>待确认事项</h3><p class="empty-section">无</p></section>
     </div>
     <footer v-if="current" class="goal-actions">
-      <p>仅确认目标，不会执行代码。</p>
+      <p>批准后开始执行，代码变更由你审阅和提交。</p>
       <div class="buttons">
-        <NButton v-if="canApprove" type="primary" :disabled="busy" @click="emit('approve')">批准目标</NButton>
+        <NButton v-if="canApprove" type="primary" :disabled="busy" :loading="busy" @click="emit('approve')">批准并执行</NButton>
         <NButton v-if="canRevise" :disabled="busy" :aria-expanded="feedbackOpen" aria-controls="goal-feedback-panel" @click="emit('revise')">{{ feedbackOpen ? '收起修改' : '提出修改' }}<ChevronDown :size="15" class="feedback-chevron" :class="{ expanded: feedbackOpen }" aria-hidden="true" /></NButton>
       </div>
     </footer>

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositories. Implemented: shared access-key login, model/GitHub settings, conversation lists/statistics, verified GitHub Issue and bounded source-context snapshots, model-generated Goals, feedback revisions, human approval, explicit Docker Runs, polling, cancellation, check/log/Report/Patch review and downloads. **Approval confirms a Goal only**; execution is a separate action. SSE, PR delivery, in-run feedback and inheritance of previous Run changes are not implemented. Current simplified scope is D-021; older roadmap designs and verification records are historical.
+RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositories. Implemented: shared access-key login, model/GitHub settings, conversation lists/statistics, verified GitHub Issue and bounded source-context snapshots, model-generated Goals, feedback revisions, human approval, Docker Runs, polling, cancellation, check/log/Report/Patch review and downloads, and explicit repair-branch delivery. **The UI's “批准并执行” action approves the Goal and then creates one Run using the returned revision/version.** The approval API itself only approves; failures/unknown outcomes never silently repeat either POST. Manual rerun/recovery remains in the Run panel. SSE, automatic PR creation/approval/merge, in-run feedback and inheritance of previous Run changes are not implemented; older roadmap designs and verification records are historical.
 
 ## Architecture & Data Flow
 

@@ -5,9 +5,9 @@ import BrandMark from '../components/BrandMark.vue'
 
 const emit = defineEmits<{ navigateAuth: [] }>()
 const steps = [
-  { number: '01', title: '固定来源与批准目标', description: '固定仓库、commit 与 Issue，查看源码上下文并人工批准目标。', icon: ListChecks },
-  { number: '02', title: '查看工具结果和检查记录', description: '显式开始执行，查看实际工具日志、基线与最终检查结果。', icon: Activity },
-  { number: '03', title: '查看差异并下载 Patch', description: '审阅代码差异和报告，下载 Patch 后由你决定如何交付。', icon: GitPullRequest },
+  { number: '01', title: '确定任务来源', description: '选择仓库、固定 commit 与 Issue，基于明确的代码版本生成方案。', icon: ListChecks },
+  { number: '02', title: '批准并执行', description: '审阅方案后启动执行，随时查看工具输出、检查结果与执行记录。', icon: Activity },
+  { number: '03', title: '审阅并交付代码', description: '核对代码变更与报告，确认后推送修复分支，再前往 GitHub 手动合并。', icon: GitPullRequest },
 ]
 </script>
 
@@ -21,8 +21,8 @@ const steps = [
       <section class="home-hero" aria-labelledby="intro-title">
         <div class="home-intro">
           <p class="eyebrow">RepoPilot · 代码任务工作台</p>
-          <h1 id="intro-title">让代码任务<br>有序推进</h1>
-          <p class="home-description">面向 Python、React 与 Vue 项目的代码任务工作台</p>
+          <h1 id="intro-title">从 Issue 到<br>可审阅的代码变更</h1>
+          <p class="home-description">生成实施方案、执行代码修改，并通过修复分支交付结果。</p>
           <NButton type="primary" attr-type="button" class="hero-action" @click="emit('navigateAuth')">
             进入工作台
             <template #icon><ArrowRight :size="18" :stroke-width="1.75" aria-hidden="true" /></template>
@@ -31,8 +31,8 @@ const steps = [
       </section>
       <section class="workflow-section" aria-labelledby="workflow-title">
         <div class="section-heading">
-          <h2 id="workflow-title">从目标到成果审阅</h2>
-          <p>执行需先准备 Docker 环境，结果仍需人工审阅。</p>
+          <h2 id="workflow-title">清晰推进每一项任务</h2>
+          <p>每次执行都从固定 commit 开始，结果由你审阅和交付。</p>
         </div>
         <ol class="home-steps" aria-label="任务流程">
           <li v-for="step in steps" :key="step.number">
@@ -47,7 +47,7 @@ const steps = [
           </li>
         </ol>
       </section>
-      <footer class="execution-boundary">批准不会自动执行；每次执行从固定 commit 重新开始。检查通过不代表独立验收，代码差异与报告仍需人工审阅。</footer>
+      <footer class="execution-boundary">支持 Python、React 和 Vue 项目。</footer>
     </main>
   </div>
 </template>

@@ -27,7 +27,7 @@ async function login(token: string): Promise<void> {
   try {
     const result = await authenticate(token)
     if (attempt !== authAttempt || route.value !== '/auth') return
-    if (result?.authenticated !== true) throw new Error('服务端未确认认证成功')
+    if (result?.authenticated !== true) throw new Error('暂时无法确认登录结果，请重试')
     establishSession(token)
     enterWorkspace()
   } catch (cause) {

@@ -28,16 +28,16 @@ function submit(): void {
     <main id="main" class="auth-layout" tabindex="-1">
       <section class="auth-intro" aria-labelledby="auth-title">
         <a class="brand-link" href="/" aria-label="返回 RepoPilot 首页" @click.prevent="emit('home')"><BrandMark /></a>
-        <p class="eyebrow">你的代码任务，从这里开始</p>
-        <h1 id="auth-title">连接你的工作台</h1>
-        <p class="intro-description">输入管理员提供的访问密钥，进入工作台并配置模型服务与 GitHub 授权。</p>
+        <p class="eyebrow">代码任务，从这里开始</p>
+        <h1 id="auth-title">登录 RepoPilot</h1>
+        <p class="intro-description">使用管理员提供的访问密钥进入工作台。模型服务与 GitHub 授权可在登录后配置。</p>
         <p id="session-note" class="session-note">
           <KeyRound :size="20" :stroke-width="1.75" aria-hidden="true" />
-          <span>访问密钥仅用于当前会话，刷新后需重新登录</span>
+          <span>访问密钥仅在本次登录期间保留，刷新页面后需要重新登录。</span>
         </p>
       </section>
-      <NCard title="工作台登录" class="auth-card">
-        <p class="card-description">使用工作台访问密钥验证身份。</p>
+      <NCard title="登录工作台" class="auth-card">
+        <p class="card-description">请输入工作台访问密钥。</p>
         <form @submit.prevent="submit">
           <label class="token-label" for="access-token">工作台访问密钥</label>
           <div class="token-field">
@@ -45,7 +45,7 @@ function submit(): void {
               v-model:value="token"
               :type="inputType"
               :disabled="props.loading"
-              placeholder="粘贴工作台访问密钥"
+              placeholder="输入访问密钥"
               :input-props="{ id: 'access-token', autocomplete: 'current-password', spellcheck: false, 'aria-describedby': 'session-note' }"
             />
             <NButton

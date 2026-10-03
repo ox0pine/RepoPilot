@@ -23,14 +23,14 @@ onUnmounted(() => {
   <NModal :show="true" :mask-closable="false" :close-on-esc="!operationBusy" :trap-focus="true" @update:show="!$event && close()">
     <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header class="dialog-header">
-        <div class="dialog-title"><span class="settings-symbol"><Settings2 :size="21" aria-hidden="true" /></span><div><h2 id="settings-title">工作台设置</h2><p>管理模型服务与仓库访问</p></div></div>
+        <div class="dialog-title"><span class="settings-symbol"><Settings2 :size="21" aria-hidden="true" /></span><div><h2 id="settings-title">工作台设置</h2><p>配置模型与 GitHub 访问</p></div></div>
         <NButton quaternary circle attr-type="button" aria-label="关闭设置" :disabled="operationBusy" @click="close"><template #icon><X :size="20" :stroke-width="1.75" aria-hidden="true" /></template></NButton>
       </header>
       <div class="dialog-body">
         <nav class="settings-categories" aria-label="设置分类">
-          <button type="button" class="category-button" :class="{ selected: activeCategory === 'model' }" :aria-current="activeCategory === 'model' ? 'page' : undefined" :disabled="operationBusy" @click="activeCategory = 'model'"><SlidersHorizontal :size="19" aria-hidden="true" /><span>模型服务<small>目标生成</small></span></button>
-          <button type="button" class="category-button" :class="{ selected: activeCategory === 'github' }" :aria-current="activeCategory === 'github' ? 'page' : undefined" :disabled="operationBusy" @click="activeCategory = 'github'"><GitBranch :size="19" aria-hidden="true" /><span>GitHub<small>仓库访问</small></span></button>
-          <p class="nav-note">设置由当前工作台共享</p>
+          <button type="button" class="category-button" :class="{ selected: activeCategory === 'model' }" :aria-current="activeCategory === 'model' ? 'page' : undefined" :disabled="operationBusy" @click="activeCategory = 'model'"><SlidersHorizontal :size="19" aria-hidden="true" /><span>模型服务<small>方案与代码变更</small></span></button>
+          <button type="button" class="category-button" :class="{ selected: activeCategory === 'github' }" :aria-current="activeCategory === 'github' ? 'page' : undefined" :disabled="operationBusy" @click="activeCategory = 'github'"><GitBranch :size="19" aria-hidden="true" /><span>GitHub<small>仓库与分支交付</small></span></button>
+          <p class="nav-note">配置由整个工作台共享</p>
         </nav>
         <div :key="activeCategory" class="settings-content">
           <ModelSettingsForm v-if="activeCategory === 'model'" @busy="operationBusy = $event" />
