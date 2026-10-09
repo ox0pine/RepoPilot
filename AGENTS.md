@@ -2,97 +2,93 @@
 
 ## Project Overview
 
-RepoPilot is a goal-driven coding workbench for Python, React, and Vue repositories. Implemented: shared access-key login, model/GitHub settings, conversation lists/statistics, verified GitHub Issue and bounded source-context snapshots, model-generated Goals, feedback revisions, human approval, Docker Runs, polling, cancellation, check/log/Report/Patch review and downloads, and explicit repair-branch delivery. **The UI's “批准并执行” action approves the Goal and then creates one Run using the returned revision/version.** The approval API itself only approves; failures/unknown outcomes never silently repeat either POST. Manual rerun/recovery remains in the Run panel. SSE, automatic PR creation/approval/merge, in-run feedback and inheritance of previous Run changes are not implemented; older roadmap designs and verification records are historical.
+RepoPilot is a self-hosted AI coding workbench for Python, React, and Vue repositories: pin a GitHub repository/commit/Issue, generate and revise a goal, obtain human approval, execute changes in Docker, then review checks and patches. Delivery to a repair branch requires a separate explicit action; do not automatically create PRs or merge changes.
 
 ## Architecture & Data Flow
 
-- Backend: async FastAPI → application services → domain contracts, PostgreSQL repositories, and external integration clients. `src/repopilot/api/app.py:create_app` is the composition root; it constructs dependencies, injects services into router builders, and manages database/Redis lifespan. Extend this explicit wiring rather than adding a parallel dependency container.
-- Creation: validate GitHub HTTPS repository URL, full 40-character commit SHA, and same-repository Issue → read fixed GitHub API and bounded tree/blob context with Git hash verification → persist immutable source snapshot and initial message. Repository context is required; no historical Issue-only snapshot compatibility. Generation/revision reuses the saved snapshot.
-- Generation: commit a generation attempt → call non-streaming Chat Completions outside the transaction → conditionally append an immutable Goal version and message. States: `draft → generating → awaiting_approval → approved`, with `generation_failed` and explicit manual retry.
-- PostgreSQL is authoritative for settings, tasks, Goal versions, messages, Runs and bounded Run events. Redis retains the original 300-second model-list cache, isolated by normalized endpoint and API key; a cache hit avoids a provider request. Expired/invalid/unavailable cache falls through to the provider, never to stale data on provider failure. API startup requires PostgreSQL and Redis. No JSON fallback or old database/schema migration support.
-- Correction (D-022): removing Redis was an unauthorized mistake, now reversed. The authorized PostgreSQL reset and current-format-only source/key/Goal contracts remain in force; do not restore old business data. Historical verification stays historical; report Redis restoration checks only after actually running them.
-- Execution: Run creation only queues under the Task lock and increments revision; its request contains only expected_revision and goal_version. Image is server configuration, not a user field. A single `python -m repopilot.worker` owns session advisory lock 721804630 and executes FIFO outside transactions. System automatically detects Python/Node projects, provisions matching tools/dependencies, chooses real existing checks, then disconnects preparation networking before model tools. Containers have readonly roots, limited executable tmpfs/resources, no host mounts/socket/credentials. Token-fenced writes prevent late workers; cleanup must succeed before cancelled/interrupted. Startup retires orphan Runs rather than replaying unknown effects. Every Run starts from its fixed commit.
-- Source preparation uses authenticated real Git clone and exact detached checkout, not archive downloads. A saved SSH private key selects strict pinned-host SSH; without a private key, HTTPS uses an ephemeral token helper. Credentials remain on the trusted control plane; the sandbox retains credential-free `.git`, excluded from Patch capture. Default Git identity is `RepoPilot <repopilot@users.noreply.github.com>`.
-- Delivery is an explicit action for completed Runs with nonempty Patch: reclone the fixed baseline, apply Patch without host source execution, commit and push a deterministic repair branch to the saved-token user's own repository. `run_deliveries` fences concurrent attempts and reconciles explicit retries. Never automatically create/approve/merge PRs or write the default branch; the UI links to GitHub for human merge.
-- Frontend: Vue composition API with typed API wrappers, a lightweight custom router, and module-level reactive stores—not Pinia or Vue Router. Requests flow through `web/src/api/client.ts`; `App.vue` coordinates authentication and page selection. Workbench credentials/data are shared, not per-user isolated.
+- Backend layers: FastAPI routes → application services → domain contracts, persistence repositories, and integration adapters. `src/repopilot/api/app.py:create_app` is the composition root; inject dependencies through constructors and router factories.
+- PostgreSQL owns settings, immutable source snapshots, versioned goals, messages, the run queue, events, and results. Redis only caches model lists—it is not the task queue.
+- The API queues approved work. `worker.py` uses a PostgreSQL advisory lock to enforce one active worker, executes Docker work outside database transactions, and persists results. Every run starts from its pinned commit, not a previous run's workspace.
+- `execution/engine.py` coordinates the model/tool loop, checks, and patch capture; `execution/workspace.py` owns Docker isolation and workspace lifecycle. Preserve whole-batch tool validation, hash/version-fenced edits, and confirmed cleanup before terminal run states.
+- Browser → same-origin `/api` → FastAPI, via Vite in development or Nginx in deployment. Vue uses a custom History API router and module-level reactive stores, not Vue Router or Pinia.
 
 ## Key Directories
 
-- `src/repopilot/{api,application,domain,persistence,integration}/`: HTTP boundaries, use-case orchestration, validated contracts, transactional storage, and external I/O respectively. Keep network work out of persistence transactions.
-- `src/repopilot/execution/` and `worker.py`: bounded model protocol, validated tools, Docker workspace/artifact capture, sequential lifecycle. Shell executes only inside the container; host Git handles trusted file data for Patch generation, not source execution.
-- `execution/environment.py` and `execution/lsp/`: automatic per-root Python `.venv` / Node environments and confined Pyright/Ruff/TS/Vue/HTML/CSS/JSON servers. Host RepoPilot development still uses Conda, never its own `.venv`. Preserve version/hash-fenced workspace edits, explicit unsupported/not-ready diagnostics, UTF16 conversion, and server shutdown before Shell/capture. Do not reintroduce manual environment/setup/check form fields.
-- `web/src/{views,components,api,router,stores,styles}/`: pages, reusable UI, HTTP contracts, navigation, shared state, and theme ownership.
-- `tests/`: backend domain/client, database-concurrency, and ASGI route tests.
-- `deploy/`: API/frontend/worker/runtime Dockerfiles and Nginx configuration. Compose builds the runtime image and starts the worker by default; only worker mounts the Docker socket. The runtime initialization service exits successfully before worker starts. `development-plan/`: historical roadmap and product decisions; current operations are in README.
-- `reference/` is ignored comparison material, not application code or an import source. `.repopilot/` and `tmp/` are local runtime/acceptance material, not maintained source. No root scripts directory or Makefile is provided.
+| Path | Responsibility |
+| --- | --- |
+| `src/repopilot/api/`, `application/`, `domain/` | HTTP/authentication, use-case orchestration, data/protocol contracts |
+| `src/repopilot/persistence/`, `integration/` | PostgreSQL transactions and repositories; GitHub/model HTTP, Redis, delivery |
+| `src/repopilot/execution/` | Docker workspaces, environment discovery, model tools, LSP sessions, patch capture |
+| `web/src/` | Typed API adapters, Vue components/views, lightweight router and stores |
+| `tests/` | Backend protocol, persistence, lifecycle, workspace, and Docker regressions |
+| `deploy/`, `docs/` | Container/Nginx recipes; configuration, development, operations, and API references |
+
+Do not import application code from ignored `reference/` materials.
 
 ## Development Commands
 
-Run from the repository root. Create `.env` from `.env.example` only if absent; configure database credentials and `API_TOKEN` without exposing secrets.
+Run from the repository root. Prepare `.env` using `.env.example` and `docs/configuration/environment.md`; preserve existing values and never commit credentials.
 
-```bash
-# Host setup; use the existing environment if already provisioned.
-conda env create --file environment.yml
+```sh
+conda env create --file environment.yml  # first-time setup
 conda activate repopilot
 python -m pip install --no-deps --editable .
-
-# Local backend with Docker-hosted dependencies.
 docker compose up -d --wait postgres redis
-python -m repopilot
-
-# Host worker alternative: do not run alongside the default Compose worker.
-docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .
-python -m repopilot.worker
-# Full Compose startup below already builds runtime and starts worker; no profile needed.
-
-# Frontend development / production type-check and build.
-npm --prefix web ci
-npm --prefix web run dev
-npm --prefix web run build
-
-# Backend lint and tests (set dedicated test URLs first; see Testing & QA).
-conda run -n repopilot ruff check src tests
-conda run -n repopilot python -m pytest tests -q
-
-# Full-stack image build and startup.
-docker compose up -d --build --wait
-docker compose ps
+python -m repopilot                     # API
 ```
 
-Full-stack UI: `http://127.0.0.1:8081/`; API defaults to port 8000. Vite proxies `/api` to `127.0.0.1:8000`; adjust its config if changing the local API port. Avoid collisions with running Docker API/web services; stop them only when intentionally switching to local development. `docker compose down` preserves volumes; **do not use `down -v` against user data**.
+Separate terminals for the frontend and, when executing tasks, the worker:
+
+```sh
+npm --prefix web ci
+npm --prefix web run dev
+
+docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .
+python -m repopilot.worker              # activated repopilot environment
+```
+
+Match the runtime image tag to `EXECUTION_IMAGE`. Do not run host API/worker instances alongside their Compose equivalents. Vite proxies `/api` to `127.0.0.1:8000`; host database/Redis URLs must address the exposed services rather than Compose hostnames.
+
+```sh
+npm --prefix web run build              # vue-tsc --noEmit, then Vite
+conda run -n repopilot ruff check src tests
+conda run -n repopilot python -m pytest tests -q
+# Narrow a regression run:
+conda run -n repopilot python -m pytest tests/test_runs.py -q
+```
+
+Tests require the dedicated-service configuration below; a passing command with skipped integrations is not full verification.
 
 ## Code Conventions & Common Patterns
 
-- Python: typed models/functions, `snake_case` modules/functions and `PascalCase` classes; Ruff targets Python 3.12 with a 100-character line length. Follow local formatting rather than reformatting unrelated code. Domain contracts use Pydantic validation, strict revisions/versions, forbidden extra fields, and UTC-aware timestamps.
-- Vue: `<script setup lang="ts">`, PascalCase component files, camelCase functions/state, explicit component/icon imports, and existing single-quote/no-semicolon style. Keep API field names consistent with backend contracts.
-- Preserve concurrency controls: short row-locked transactions, `expected_revision` conflicts, generation UUIDs, and 90-second database-clock leases. Late generation results cannot overwrite newer attempts. Lease recovery occurs during reads/writes, not in a worker; semantic rejection must not roll back already-recorded lease recovery.
-- Goal revision immediately revokes prior approval, even if generation fails. A 409 requires rereading and human confirmation, not silent overwrite. Preserve cancellation propagation and shielded generation cleanup.
-- Return safe domain/API errors, never raw provider/driver exceptions or credentials. Provider authentication failures are safe 502s, not workbench 401s. Preserve history/drafts on failures; do not disguise failed reads as empty lists or zero statistics.
-- Frontend tokens stay in memory. Guard asynchronous results using session versions, request sequences, and `AbortController`; token equality alone cannot distinguish logout/re-login. Only a current-session 401 may clear authentication. Deduplicate paginated tasks by ID because updated records can move forward.
-- Use Naive UI and official `@lucide/vue`, not a second component library. `styles/theme.ts` owns the shared palette/theme overrides; `main.ts` installs CSS variables before mount, including for Teleport dialogs. Preserve responsive layouts, focus return/trapping, and busy-state close guards.
-- GitHub token saving is local encrypted persistence; optional SSH authorization is a separate explicit network-write action. Never introduce automatic registration into source/Goal flows. Preserve model-key semantics: omitted key retains it for the same endpoint; changing endpoints must not reuse the old key.
-- Keep current-only storage/protocol contracts: generated Ed25519/OpenSSH keypairs only, no RSA/ECDSA/PEM or incomplete-pair repair; Goal responses must be JSON, not Markdown fences. Empty settings are valid fresh-install state. A database reset requires explicit user authorization and clears all saved settings/history; never restore old data implicitly.
-- Supported automatic environments are Python and Node frontend only. Retain project lockfiles as authoritative, record actual tools and check coverage, and expose missing/failed configuration instead of inventing successful checks. Environment network access is system-managed preparation only; model tools stay offline. Baseline tracked files remain in artifacts even beneath directories excluded for generated dependencies.
+- Python: type annotations, `snake_case` functions/modules, existing service/repository boundaries. Ruff targets Python 3.12 with a 100-character line length. TypeScript is strict; Vue components use PascalCase filenames and `<script setup lang="ts">`. Reuse Naive UI and Lucide.
+- Keep database lock transactions short; do not perform network or Docker work while holding them. Preserve revision/goal-version checks, generation/delivery leases, worker ownership tokens, and durable event ordering around side effects.
+- Approval, run creation, and delivery are distinct operations. Retain conflict handling and reconciliation rather than silently retrying writes whose outcome is unknown.
+- Use domain/application error handling and safe API errors; sanitize upstream failures and keep secrets out of logs, events, and model context. Inject HTTP transports for protocol tests instead of bypassing real parsing.
+- Frontend calls go through `web/src/api/client.ts` and typed adapters. Tokens remain memory-only. Preserve abort controllers, request/session-generation guards, monotonic revision merges, and session-fenced 401 handling so stale responses cannot overwrite newer state.
+- Preserve cancellation and cleanup behavior across async tasks; terminal status must not imply successful container cleanup without confirmation.
+- Behavior changes update the relevant `docs/` page and `CHANGELOG.md`. Historical verification records are not evidence that current changes pass.
 
 ## Important Files
 
-- `src/repopilot/__main__.py`, `cli.py`: launch the API, not a task-execution CLI; `api/app.py`: application factory/lifespan; `config.py`: environment settings.
-- `application/tasks.py`, `persistence/tasks.py`, `domain/tasks.py`: orchestration, state transitions/locking, and task/Goal contracts.
-- `persistence/database.py`: shared SQLAlchemy Base/table definitions and initialization. Current schema setup uses `create_all`, not an established migration workflow.
-- `web/src/api/client.ts`, `stores/session.ts`, `stores/tasks.ts`, `router/index.ts`: request/auth races, session lifetime, pagination, and deep links.
-- `pyproject.toml`, `environment.yml`, `requirements-dev.in`, `requirements-dev.txt`, `uv.lock`, `web/package.json`, `web/package-lock.json`: tooling/dependencies. `compose.yaml`, `.env.example`, `deploy/nginx.conf`, `web/vite.config.ts`: deployment/proxy settings.
-- `README.md`: current operations and implemented behavior; `development-plan/03-roadmap.md`: phase gates; `development-plan/04-decisions.md`: architectural decisions. Older planning descriptions can lag implementation.
+- `src/repopilot/__main__.py`, `cli.py`: API launch; `api/app.py`: dependency composition and resource lifecycle; `worker.py`: execution/recovery entry point.
+- `persistence/tasks.py`, `persistence/runs.py` under `src/repopilot/`: revision-controlled lifecycle, queue ownership, and result persistence. `persistence/database.py` bootstraps tables; do not assume an existing migration workflow.
+- `src/repopilot/execution/tools.py`, `execution/lsp/manager.py`: tool contracts and snapshot-validated semantic edits. `integration/delivery.py`: explicit repair-branch delivery and remote-conflict safeguards.
+- `web/src/App.vue`, `router/index.ts`, `stores/session.ts`, `stores/tasks.ts`: routing, authentication, shared state. `views/ConversationView.vue` and `components/RunPanel.vue`: approval/run polling and uncertain-write handling.
+- `pyproject.toml`, `environment.yml`, `requirements-dev.in`, `requirements-dev.txt`, `uv.lock`: Python packaging and dependency configuration. `web/package.json`, `web/package-lock.json`, `web/vite.config.ts`: frontend tooling.
+- `compose.yaml`, `deploy/runtime.Dockerfile`: deployment topology and execution toolchain. Start with `docs/development/contributing.md` and `docs/development/architecture.md`; use `docs/reference/security.md` for isolation boundaries.
 
 ## Runtime/Tooling Preferences
 
-- Python `>=3.12`; host development uses the `repopilot` Conda environment (pinned Python 3.12.14), **not `.venv`**. Keep development requirements input/output aligned. `uv.lock` exists, but host setup uses Conda/pip and the API image installs with pip; do not assume `uv sync` is the standard workflow.
-- Frontend uses npm with committed package lock, not Bun. Node requirement: `^20.19.0 || >=22.12.0`; Docker builds with Node 22. TypeScript is strict. No frontend lint/test script is currently defined.
-- PostgreSQL 16 and Redis 7 run as separate services; their client packages do not supply servers. Redis is only the model-list cache, not an execution queue. Docker host ports bind loopback. Container access to host model services uses `host.docker.internal`, not container-local `127.0.0.1`.
-- Never overwrite `.env` or user credentials for verification. GitHub token/private key encryption requires the stable `GITHUB_CREDENTIALS_KEY`; replacing it cannot recover existing ciphertext. Model API keys currently remain plaintext in PostgreSQL, although responses omit them: protect database backups and never log secrets.
+- Python `>=3.12`; preferred host development uses the `repopilot` Conda environment, not `.venv`. `environment.yml` pins Python 3.12.14 and installs hash-locked host dependencies.
+- Frontend uses npm and its committed lockfile, with Node `^20.19.0 || >=22.12.0`; do not replace this with Bun. Use `npm ci` for reproducible installation.
+- Keep dependency declarations and their corresponding locks aligned. Host `requirements-dev.in`/`.txt`, application `pyproject.toml`/`uv.lock`, and sandbox tooling are separate dependency surfaces, not interchangeable environments.
+- Git, Docker Engine/Compose, PostgreSQL, and Redis are required for the complete workflow. The worker mounts the Docker socket: deploy only on a trusted host, and never expose control-plane credentials to task containers.
 
 ## Testing & QA
 
-- Pytest + pytest-asyncio (`asyncio_mode = "auto"`); discovery defaults to `tests/`. Set `TEST_DATABASE_URL` (`postgresql+asyncpg://…`) and `TEST_REDIS_URL` (`redis://…`) to **dedicated test instances**, never workbench services. Database fixtures create/drop UUID schemas; route fixtures enter the real app lifespan with the dedicated Redis URL. Cache tests isolate endpoints/keys and delete only their own entries. Missing-service skips are not passing integration verification.
-- Inject `httpx.MockTransport` for GitHub/model HTTP and use `ASGITransport` for API tests. Use real isolated PostgreSQL for persistence, locking, and rollback behavior. Keep production clients on real network paths; do not add fixed Goals or mock-source fallbacks.
-- Prioritize revisions/approval invalidation, stale-result rejection, cancellation, lease recovery, pagination, secret redaction, credential replacement, upstream failures, and size/deadline boundaries. No numerical coverage threshold is configured; installed coverage tooling is not a coverage policy.
-- Frontend build runs `vue-tsc --noEmit` plus Vite. UI changes also need browser checks at desktop/mobile sizes: auth races, deep links, drafts/errors, modal keyboard/focus behavior, and overflow. Controlled fixtures prove interaction only, not real GitHub/model/execution success. Report the checks actually run rather than quoting historical test counts.
+- pytest and pytest-asyncio; `pyproject.toml` sets `testpaths = ["tests"]` and `asyncio_mode = "auto"`. Follow `tests/test_*.py`; shared fixtures live in owning modules such as `tests/test_tasks.py` and are imported by dependent suites.
+- Set `TEST_DATABASE_URL` and `TEST_REDIS_URL` to **dedicated test services**, never the workbench's production/development data services. Database fixtures use UUID schemas; Redis fixtures delete only their own keys.
+- Protocol tests use injected HTTP transports; filesystem tests use `tmp_path` and real local Git. Enable real Docker scenarios with `REPOPILOT_DOCKER_TESTS=1` after building the runtime image, e.g. `REPOPILOT_DOCKER_TESTS=1 conda run -n repopilot python -m pytest tests -q` with both test URLs exported.
+- Missing infrastructure can cause skips. Report what actually ran and which integrations were skipped. No enforced coverage percentage is configured.
+- There is no independent frontend test or lint script. Run the frontend build and exercise affected desktop/mobile interactions; compilation alone does not verify UI behavior.
