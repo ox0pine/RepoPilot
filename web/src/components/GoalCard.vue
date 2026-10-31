@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
-import { ChevronDown, CircleAlert, Target } from '@lucide/vue'
+import { ChevronDown, CircleAlert } from '@lucide/vue'
 import type { TaskGoal } from '../api/tasks'
 
 const props = defineProps<{
@@ -25,12 +25,10 @@ const sections = computed(() => [
 <template>
   <article class="goal-card" :aria-label="`方案版本 ${goal.version}${current ? '，当前版本' : '，历史版本'}`">
     <header class="goal-heading">
-      <span class="goal-title"><Target :size="18" aria-hidden="true" />方案 v{{ goal.version }}</span>
-      <span class="version-label">{{ current ? '当前版本' : '历史版本' }}</span>
-      <span v-if="approved" class="approved-label">已批准</span>
+      <span class="goal-title">方案 v{{ goal.version }}</span>
+      <span v-if="approved && !current" class="approved-label">已批准</span>
     </header>
     <div class="goal-content">
-      <p class="draft-note">确认修改范围和验收标准后，再批准执行。</p>
       <section><h3>方案概述</h3><p class="goal-summary">{{ goal.content.summary }}</p></section>
       <section v-for="section in sections" :key="section.title">
         <h3>{{ section.title }}</h3>
@@ -43,10 +41,11 @@ const sections = computed(() => [
         <p>请先确认以下问题；需要补充信息时，可提出修改。</p>
         <ul><li v-for="(question, index) in goal.content.open_questions" :key="index">{{ question }}</li></ul>
       </section>
-      <section v-else><h3>待确认事项</h3><p class="empty-section">无</p></section>
+      <p v-else class="no-questions">没有待确认事项。</p>
     </div>
     <footer v-if="current" class="goal-actions">
-      <p>批准后开始执行，代码变更由你审阅和提交。</p>
+      <p v-if="!approved">批准后开始执行，代码变更由你审阅和提交。</p>
+      <p v-else>方案已批准，执行记录见下方。</p>
       <div class="buttons">
         <NButton v-if="canApprove" type="primary" :disabled="busy" :loading="busy" @click="emit('approve')">批准并执行</NButton>
         <NButton v-if="canRevise" :disabled="busy" :aria-expanded="feedbackOpen" aria-controls="goal-feedback-panel" @click="emit('revise')">{{ feedbackOpen ? '收起修改' : '提出修改' }}<ChevronDown :size="15" class="feedback-chevron" :class="{ expanded: feedbackOpen }" aria-hidden="true" /></NButton>
@@ -58,11 +57,9 @@ const sections = computed(() => [
 <style scoped>
 .goal-card { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; overflow-wrap: anywhere; }
 .goal-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--border-soft); }
-.goal-title { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--accent); }
-.version-label { color: var(--text-muted); font-size: 12px; }
+.goal-title { font-weight: 600; }
 .approved-label { border-radius: 6px; padding: 2px 8px; background: var(--success-bg); color: var(--success-text); font-size: 12px; }
 .goal-content { padding: 20px; }
-.draft-note { margin: 0 0 20px; color: var(--text-muted); font-size: 12px; }
 section + section { margin-top: 20px; }
 h3 { margin: 0 0 8px; color: var(--text); font-size: 15px; }
 p { margin: 0; }
@@ -70,6 +67,7 @@ p { margin: 0; }
 ul, ol { margin: 0; padding-left: 22px; }
 li + li { margin-top: 6px; }
 .empty-section { color: var(--text-muted); }
+.no-questions { margin-top: 20px; color: var(--text-muted); font-size: 13px; }
 .question-warning { padding: 16px; border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); }
 .question-warning h3 { display: flex; align-items: center; gap: 8px; color: inherit; }
 .question-warning p { margin-bottom: 10px; font-size: 13px; }

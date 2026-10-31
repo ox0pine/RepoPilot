@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NInput, NSkeleton } from 'naive-ui'
-import { CheckCircle2, Copy, ExternalLink, LoaderCircle, MessageSquare } from '@lucide/vue'
+import { ArrowLeft, CheckCircle2, CircleAlert, Copy, ExternalLink, LoaderCircle, MessageSquare } from '@lucide/vue'
 import GoalCard from '../components/GoalCard.vue'
 import RunPanel from '../components/RunPanel.vue'
 import { ApiError } from '../api/client'
 import { approveGoal, generateGoal, getTask, type GenerationAction, type TaskDetail, type TaskGoal, type TaskStatus } from '../api/tasks'
 import { createRun } from '../api/runs'
+import { followLink } from '../router'
 import { sessionToken, sessionVersion } from '../stores/session'
 import { consumeAutoGenerate } from '../stores/tasks'
 
@@ -40,6 +41,10 @@ const canSubmitFeedback = computed(() => canRevise.value && !busy.value && !gene
 const messages = computed(() => [...(task.value?.messages ?? [])].sort((a, b) => a.id - b.id))
 const goals = computed(() => new Map(task.value?.goals.map(goal => [goal.version, goal]) ?? []))
 function goalFor(version: number | null): TaskGoal | undefined { return version === null ? undefined : goals.value.get(version) }
+const currentGoal = computed(() => goalFor(task.value?.current_goal_version ?? null))
+const historyMessages = computed(() => messages.value.filter(message => message.kind !== 'source'
+  && !(message.kind === 'goal' && message.goal_version === task.value?.current_goal_version)))
+function repositoryName(url: string): string { return url.replace('https://github.com/', '') }
 function safeLink(value: string): string | undefined {
   return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/issues\/[1-9][0-9]*)?$/.test(value) ? value : undefined
 }
@@ -222,135 +227,157 @@ onBeforeUnmount(resetRequests)
 </script>
 
 <template>
-  <div class="conversation">
+  <div class="task">
+    <a class="back-link" href="/app" @click="followLink($event, '/app')"><ArrowLeft :size="16" aria-hidden="true" />返回任务列表</a>
     <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
     <div v-if="loading && !task" class="loading-state" role="status" aria-label="正在加载任务"><NSkeleton height="36px" width="70%" /><NSkeleton height="140px" :sharp="false" /><NSkeleton height="260px" :sharp="false" /></div>
     <div v-if="readError" class="error-notice" role="alert"><p>无法加载任务：{{ readError }}{{ task ? '。当前显示的是上次加载的内容。' : '' }}</p><NButton :loading="loading" @click="loadDetail(true)">重新加载</NButton></div>
     <template v-if="task">
-      <header class="conversation-heading"><div><p class="eyebrow">任务详情</p><h1>{{ task.title }}</h1></div><span class="status-badge" :class="task.status">{{ statuses[task.status] }}</span></header>
-      <section class="source-card" aria-label="任务来源">
-        <div class="source-row"><span class="source-label">仓库</span><a :href="safeLink(task.repository_url)" target="_blank" rel="noopener noreferrer">{{ task.repository_url }}<ExternalLink :size="14" aria-hidden="true" /></a></div>
-        <div class="source-row"><span class="source-label">Issue</span><a :href="safeLink(task.issue_url)" target="_blank" rel="noopener noreferrer">{{ task.issue_url }}<ExternalLink :size="14" aria-hidden="true" /></a></div>
-        <div class="source-row"><span class="source-label">基准版本</span><code>{{ task.baseline_commit }}</code><NButton size="small" aria-label="复制完整 commit SHA" @click="copyCommit"><Copy :size="14" aria-hidden="true" />复制</NButton></div>
-        <p class="source-note">来源保存于 {{ formatDate(task.source_snapshot.fetched_at) }}。更换仓库、版本或 Issue，请新建任务。</p>
-        <details class="repository-context">
-          <summary>生成方案时参考的代码</summary>
-          <p>代码版本：<code>{{ task.source_snapshot.repository_context.commit }}</code></p>
-          <p>方案基于以下代码片段生成，并非完整仓库审查。执行时会克隆完整的指定版本。</p>
-          <p v-if="task.source_snapshot.repository_context.tree_truncated">仅显示部分文件目录。</p>
-          <ul><li v-for="(omission, index) in task.source_snapshot.repository_context.omissions" :key="index">{{ omission }}</li></ul>
-          <p v-if="!task.source_snapshot.repository_context.files.length">没有可展示的代码片段。</p>
-          <details v-for="file in task.source_snapshot.repository_context.files" :key="file.path"><summary>{{ file.path }}{{ file.truncated ? '（内容已截断）' : '' }}</summary><p>{{ file.reason }}</p><p>Blob SHA：<code>{{ file.blob_sha }}</code></p><pre>{{ file.content }}</pre></details>
-          <details><summary>参考文件目录</summary><pre>{{ task.source_snapshot.repository_context.tree.join('\n') }}</pre></details>
-        </details>
-      </section>
-      <ol class="timeline" aria-label="任务记录">
-        <li v-for="message in messages" :key="message.id" class="timeline-item">
-          <div class="message-meta"><span>{{ message.kind === 'source' ? '任务来源' : message.kind === 'feedback' ? '你的修改意见' : message.kind === 'approval' ? `批准记录 · v${message.goal_version}` : `方案 · v${message.goal_version}` }}</span><time :datetime="message.created_at">{{ formatDate(message.created_at) }}</time></div>
-          <template v-if="message.kind === 'goal'">
-            <template v-if="goalFor(message.goal_version)">
-              <GoalCard v-if="message.goal_version === task.current_goal_version" :goal="goalFor(message.goal_version)!" current :can-approve="task.status === 'awaiting_approval' && !runActive" :can-revise="canRevise" :feedback-open="feedbackOpen" :busy="!!busy || generating || runActive" :approved="task.status === 'approved' && task.approved_goal_version === message.goal_version" @approve="perform('approve')" @revise="toggleFeedback" />
-              <details v-else class="history-goal"><summary>查看历史方案 v{{ message.goal_version }}</summary><GoalCard :goal="goalFor(message.goal_version)!" :current="false" :can-approve="false" :can-revise="false" :feedback-open="false" :busy="false" :approved="false" /></details>
-            </template>
-            <p v-else class="error-notice">无法加载这版方案，请重新加载任务。</p>
-          </template>
-          <div v-else class="message-card" :class="message.kind"><CheckCircle2 v-if="message.kind === 'approval'" :size="18" aria-hidden="true" /><MessageSquare v-else-if="message.kind === 'feedback'" :size="18" aria-hidden="true" /><p>{{ message.kind === 'approval' ? '方案已批准' : message.text }}</p></div>
-        </li>
-      </ol>
-      <section v-if="generating" class="generation-card" role="status" aria-live="polite" aria-atomic="true">
-        <div class="generation-heading">
-          <span class="generation-icon" aria-hidden="true"><LoaderCircle :size="20" :stroke-width="1.75" /></span>
-          <div class="generation-copy"><h2>{{ task.current_goal_version ? '正在更新方案' : '正在生成方案' }}</h2><p>{{ task.current_goal_version ? '根据你的修改意见调整方案。' : '正在分析 Issue 和相关代码，整理修改方案。' }}</p></div>
-          <span class="generation-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <header class="task-heading">
+        <div class="task-title-block">
+          <h1>{{ task.title }}</h1>
+          <p class="task-meta">
+            <a :href="safeLink(task.repository_url)" target="_blank" rel="noopener noreferrer">{{ repositoryName(task.repository_url) }}<ExternalLink :size="13" aria-hidden="true" /></a>
+            <span class="separator" aria-hidden="true">·</span>
+            <a :href="safeLink(task.issue_url)" target="_blank" rel="noopener noreferrer">Issue #{{ task.source_snapshot.issue_number }}<ExternalLink :size="13" aria-hidden="true" /></a>
+            <span class="separator" aria-hidden="true">·</span>
+            <span class="commit"><code>{{ task.baseline_commit }}</code><NButton size="tiny" :focusable="true" aria-label="复制完整 commit SHA" @click="copyCommit"><Copy :size="13" aria-hidden="true" />复制</NButton></span>
+          </p>
         </div>
-        <div class="generation-preview" aria-hidden="true"><span></span><span></span><span></span></div>
-        <p class="generation-note">完成后即可审阅并执行。</p>
-      </section>
+        <span class="status-badge" :class="task.status">{{ statuses[task.status] }}</span>
+      </header>
+
       <div v-if="actionError" class="error-notice" role="alert"><p>{{ actionError }}</p><NButton v-if="needsSettings" @click="emit('settings')">打开设置</NButton></div>
-      <div v-if="task.status === 'generation_failed' && !generating" class="error-notice" role="alert"><div><strong>方案生成失败</strong><p>{{ task.last_error || '请稍后重试。' }}</p><p v-if="task.current_goal_version">请重新生成方案后再批准执行。</p></div><NButton :disabled="!!busy || runActive" @click="perform('retry')">重新生成</NButton></div>
-      <div v-if="task.status === 'draft' && !generating" class="draft-actions"><p>任务来源已保存，可以生成修改方案。</p><NButton type="primary" :disabled="!!busy || runActive" @click="perform('generate')">生成方案</NButton></div>
-      <section v-if="task.current_goal_version" v-show="feedbackOpen" id="goal-feedback-panel" class="feedback-card" aria-labelledby="feedback-title">
-        <h2 id="feedback-title">提出修改</h2><p v-if="task.status === 'approved'" class="revocation-note">修改后需要重新批准方案；如果生成失败，请重试后再执行。</p>
-        <label for="goal-feedback">需要调整的内容</label>
-        <NInput ref="feedbackInput" v-model:value="feedback" type="textarea" placeholder="例如：只修复边界条件，保留现有接口，并补充测试" :autosize="{ minRows: 4, maxRows: 12 }" :disabled="!!busy || generating || !canRevise" :input-props="{ id: 'goal-feedback', 'aria-describedby': 'feedback-help' }" @keydown="feedbackKeydown" />
-        <div class="feedback-footer"><p id="feedback-help">Ctrl / Cmd + Enter 提交 · 最多 8,000 字符</p><NButton type="primary" :disabled="!canSubmitFeedback" :loading="busy === 'revise'" @click="perform('revise')">更新方案</NButton></div>
-        <p v-if="feedback.trim().length > 8000" class="feedback-error" role="alert">修改意见不能超过 8,000 字符，请缩短后提交。</p>
+
+      <section v-if="generating" class="next-step" role="status" aria-live="polite" aria-atomic="true">
+        <LoaderCircle class="generation-spinner" :size="20" :stroke-width="1.75" aria-hidden="true" />
+        <div><h2>{{ task.current_goal_version ? '正在更新方案' : '正在生成方案' }}</h2><p>{{ task.current_goal_version ? '根据你的修改意见调整方案。' : '正在分析 Issue 和相关代码，整理修改方案。' }}完成后即可审阅并批准执行。</p></div>
       </section>
+      <section v-else-if="task.status === 'generation_failed'" class="next-step is-error" role="alert">
+        <CircleAlert :size="20" :stroke-width="1.75" aria-hidden="true" />
+        <div><h2>方案生成失败</h2><p>{{ task.last_error || '请稍后重试。' }}</p><p v-if="task.current_goal_version" class="hint">请重新生成方案后再批准执行。</p></div>
+        <NButton :disabled="!!busy || runActive" @click="perform('retry')">重新生成</NButton>
+      </section>
+      <section v-else-if="task.status === 'draft'" class="next-step">
+        <div><h2>生成方案</h2><p>任务来源已保存。根据 Issue 和相关代码生成修改方案，审阅后才会执行。</p></div>
+        <NButton type="primary" :disabled="!!busy || runActive" @click="perform('generate')">生成方案</NButton>
+      </section>
+
+      <section v-if="currentGoal" class="block">
+        <GoalCard :goal="currentGoal" current :can-approve="task.status === 'awaiting_approval' && !runActive" :can-revise="canRevise" :feedback-open="feedbackOpen" :busy="!!busy || generating || runActive" :approved="task.status === 'approved' && task.approved_goal_version === currentGoal.version" @approve="perform('approve')" @revise="toggleFeedback" />
+        <section v-show="feedbackOpen" id="goal-feedback-panel" class="feedback-card" aria-labelledby="feedback-title">
+          <h3 id="feedback-title">提出修改</h3><p v-if="task.status === 'approved'" class="revocation-note">修改后需要重新批准方案；如果生成失败，请重试后再执行。</p>
+          <label for="goal-feedback">需要调整的内容</label>
+          <NInput ref="feedbackInput" v-model:value="feedback" type="textarea" placeholder="例如：只修复边界条件，保留现有接口，并补充测试" :autosize="{ minRows: 4, maxRows: 12 }" :disabled="!!busy || generating || !canRevise" :input-props="{ id: 'goal-feedback', 'aria-describedby': 'feedback-help' }" @keydown="feedbackKeydown" />
+          <div class="feedback-footer"><p id="feedback-help">Ctrl / Cmd + Enter 提交 · 最多 8,000 字符</p><NButton type="primary" :disabled="!canSubmitFeedback" :loading="busy === 'revise'" @click="perform('revise')">更新方案</NButton></div>
+          <p v-if="feedback.trim().length > 8000" class="feedback-error" role="alert">修改意见不能超过 8,000 字符，请缩短后提交。</p>
+        </section>
+      </section>
+
       <RunPanel v-if="task.current_goal_version" :key="`${task.id}:${runPanelVersion}`" :task-id="task.id" :revision="task.revision" :goal-version="task.current_goal_version" :approved="task.status === 'approved' && task.approved_goal_version === task.current_goal_version && !busy && !generating" @active="runActive = $event" @changed="executionChanged" />
+
+      <details v-if="historyMessages.length" class="history-block">
+        <summary>历史记录（{{ historyMessages.length }} 项）</summary>
+        <ol class="timeline" aria-label="方案与批准记录">
+          <li v-for="message in historyMessages" :key="message.id" class="timeline-item">
+            <div class="message-meta"><span>{{ message.kind === 'feedback' ? '你的修改意见' : message.kind === 'approval' ? `批准记录 · v${message.goal_version}` : `方案 · v${message.goal_version}` }}</span><time :datetime="message.created_at">{{ formatDate(message.created_at) }}</time></div>
+            <template v-if="message.kind === 'goal'">
+              <details v-if="goalFor(message.goal_version)" class="history-goal"><summary>查看方案 v{{ message.goal_version }}</summary><GoalCard :goal="goalFor(message.goal_version)!" :current="false" :can-approve="false" :can-revise="false" :feedback-open="false" :busy="false" :approved="task.approved_goal_version === message.goal_version" /></details>
+              <p v-else class="error-notice">无法加载这版方案，请重新加载任务。</p>
+            </template>
+            <div v-else class="message-card" :class="message.kind"><CheckCircle2 v-if="message.kind === 'approval'" :size="18" aria-hidden="true" /><MessageSquare v-else :size="18" aria-hidden="true" /><p>{{ message.kind === 'approval' ? '方案已批准' : message.text }}</p></div>
+          </li>
+        </ol>
+      </details>
+
+      <details class="context-note">
+        <summary>任务来源快照</summary>
+        <p>来源保存于 {{ formatDate(task.source_snapshot.fetched_at) }}。更换仓库、版本或 Issue，请新建任务。</p>
+        <p>代码版本：<code>{{ task.source_snapshot.repository_context.commit }}</code></p>
+        <p>生成方案时参考了以下代码片段，并非完整仓库审查。执行时会克隆完整的指定版本。</p>
+        <p v-if="task.source_snapshot.repository_context.tree_truncated">仅显示部分文件目录。</p>
+        <ul v-if="task.source_snapshot.repository_context.omissions.length"><li v-for="(omission, index) in task.source_snapshot.repository_context.omissions" :key="index">{{ omission }}</li></ul>
+        <p v-if="!task.source_snapshot.repository_context.files.length">没有可展示的代码片段。</p>
+        <details v-for="file in task.source_snapshot.repository_context.files" :key="file.path"><summary>{{ file.path }}{{ file.truncated ? '（内容已截断）' : '' }}</summary><p>{{ file.reason }}</p><p>Blob SHA：<code>{{ file.blob_sha }}</code></p><pre>{{ file.content }}</pre></details>
+        <details><summary>参考文件目录</summary><pre>{{ task.source_snapshot.repository_context.tree.join('\n') }}</pre></details>
+      </details>
+
       <div ref="timelineEnd" class="timeline-end" aria-hidden="true" />
     </template>
   </div>
 </template>
 
 <style scoped>
-.conversation { width: 100%; max-width: 960px; margin: 0 auto; color: var(--text); overflow-wrap: anywhere; }
-.conversation-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 24px; }
-.conversation-heading > div { min-width: 0; }
-h1 { font-size: 26px; line-height: 1.4; margin: 0; }
-.eyebrow { margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
+.task { width: 100%; max-width: 900px; margin: 0 auto; color: var(--text); overflow-wrap: anywhere; }
+.back-link { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--text-secondary); font-size: 13px; text-decoration: none; }
+.back-link:hover { color: var(--accent); }
+.task-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin: 8px 0 24px; }
+.task-title-block { min-width: 0; }
+h1 { margin: 0 0 8px; font-size: 24px; line-height: 1.4; }
+.task-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin: 0; color: var(--text-muted); font-size: 12px; }
+.task-meta a { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); text-decoration: none; overflow-wrap: anywhere; }
+.task-meta a:hover { color: var(--accent); text-decoration: underline; }
+.task-meta a svg, .task-meta a:focus-visible, .commit code:focus-visible { flex-shrink: 0; }
+.separator { color: var(--border); }
+.commit { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+code { padding: 2px 5px; border-radius: 4px; background: var(--code-bg); font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
 .status-badge { flex-shrink: 0; padding: 5px 10px; border-radius: 6px; background: var(--surface-hover); color: var(--text-secondary); font-size: 12px; }
 .status-badge.awaiting_approval { background: var(--warning-bg); color: var(--warning-text); }
 .status-badge.generating { background: var(--accent-soft); color: var(--accent); }
 .status-badge.approved { background: var(--success-bg); color: var(--success-text); }
 .status-badge.generation_failed { background: var(--danger-bg); color: var(--danger-text); }
-.source-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); margin-bottom: 24px; }
-.source-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
-.source-row + .source-row { margin-top: 10px; }
-.source-label { width: 56px; flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
-a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
-a svg { display: inline; vertical-align: middle; margin-left: 6px; }
-a:hover { text-decoration: underline; }
-a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-code { font-size: 12px; background: var(--code-bg); border-radius: 4px; padding: 3px 6px; overflow-wrap: anywhere; min-width: 0; }
-.source-note { margin: 14px 0 0; font-size: 12px; color: var(--text-muted); }
-.repository-context { margin-top: 16px; font-size: 12px; line-height: 1.7; }
-.repository-context summary { cursor: pointer; padding: 8px 0; }
-.repository-context pre { padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 320px; overflow-y: auto; background: var(--code-bg); border-radius: 6px; }
+.block { margin-bottom: 24px; }
+.next-step { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px; margin-bottom: 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.next-step > svg { flex-shrink: 0; margin-top: 2px; color: var(--accent); }
+.next-step > div { flex: 1; min-width: 0; }
+.next-step h2 { margin: 0 0 4px; font-size: 15px; line-height: 1.6; }
+.next-step p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+.next-step .hint { margin-top: 4px; color: var(--text-muted); font-size: 12px; }
+.next-step.is-error { border-color: color-mix(in srgb, var(--danger-text) 25%, var(--border)); background: var(--danger-bg); }
+.next-step.is-error > svg, .next-step.is-error h2 { color: var(--danger-text); }
+.next-step.is-error p { color: var(--danger-text); }
+.generation-spinner { animation: generation-spin 2s linear infinite; }
+@keyframes generation-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .generation-spinner { animation: none; } }
 .timeline { list-style: none; padding: 0; margin: 0; }
-.timeline-item { margin-bottom: 24px; }
+.timeline-item { margin-bottom: 16px; }
+.timeline-item:last-child { margin-bottom: 0; }
 .message-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-bottom: 8px; color: var(--text-muted); font-size: 12px; }
 .message-meta > span { color: var(--text-secondary); font-weight: 600; }
-.message-card { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; padding: 16px 20px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface); }
+.message-card { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; padding: 14px 18px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface); }
 .message-card p { margin: 0; white-space: pre-wrap; min-width: 0; flex: 1; }
 .message-card svg { flex-shrink: 0; margin-top: 3px; }
 .message-card.feedback { background: var(--accent-soft); }
 .message-card.approval { color: var(--success-text); background: var(--success-bg); }
-.history-goal > summary { cursor: pointer; color: var(--text-secondary); padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.history-goal[open] > summary { margin-bottom: 10px; }
-.error-notice, .draft-actions { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-radius: 12px; margin-bottom: 24px; }
-.error-notice { color: var(--danger-text); background: var(--danger-bg); }
-.draft-actions { background: var(--surface); border: 1px solid var(--border); align-items: center; justify-content: space-between; }
-.error-notice p, .draft-actions p { margin: 4px 0 0; }
-.error-notice > p { flex: 1; min-width: 0; }
-.generation-card { padding: 22px 24px; margin-bottom: 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.generation-heading { display: flex; align-items: center; gap: 14px; }
-.generation-icon { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
-.generation-icon svg { animation: generation-spin 2s linear infinite; }
-.generation-copy { flex: 1; min-width: 0; }
-.generation-copy h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.6; }
-.generation-copy p { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
-.generation-dots { display: flex; flex-shrink: 0; gap: 4px; padding-left: 8px; }
-.generation-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--text-muted); animation: generation-pulse 1.8s ease-in-out infinite; }
-.generation-dots i:nth-child(2) { animation-delay: .2s; }
-.generation-dots i:nth-child(3) { animation-delay: .4s; }
-.generation-preview { display: grid; gap: 9px; max-width: 440px; margin: 22px 0 18px 54px; }
-.generation-preview span { display: block; height: 7px; border-radius: 4px; background: var(--surface-hover); }
-.generation-preview span:nth-child(2) { width: 86%; }
-.generation-preview span:nth-child(3) { width: 58%; }
-.generation-note { margin: 0 0 0 54px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
-@keyframes generation-spin { to { transform: rotate(360deg); } }
-@keyframes generation-pulse { 0%, 100% { opacity: .3; } 50% { opacity: .8; } }
-@media (prefers-reduced-motion: reduce) { .generation-icon svg, .generation-dots i { animation: none; } }
-@media (max-width: 480px) { .generation-card { padding: 18px 16px; } .generation-heading { align-items: flex-start; gap: 12px; } .generation-dots { display: none; } .generation-preview { margin-left: 52px; } .generation-note { margin-left: 52px; } }
-.feedback-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-h2 { margin: 0 0 16px; font-size: 17px; }
-label { display: block; margin-bottom: 8px; color: var(--text-secondary); font-size: 13px; }
+.history-block, .context-note { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); font-size: 13px; line-height: 1.7; }
+.history-block > summary, .context-note > summary { cursor: pointer; padding: 14px 18px; color: var(--text-secondary); font-weight: 600; }
+.history-block[open] > summary, .context-note[open] > summary { border-bottom: 1px solid var(--border-soft); margin-bottom: 16px; }
+.history-block > ol, .context-note > p, .context-note > ul, .context-note > details { margin-left: 18px; margin-right: 18px; }
+.history-block > ol { margin-bottom: 18px; }
+.context-note > details { padding: 6px 0; }
+.context-note > details > summary { cursor: pointer; padding: 4px 0; }
+.history-goal { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.history-goal > summary { cursor: pointer; padding: 10px 14px; color: var(--text-secondary); font-size: 13px; }
+.history-goal[open] > summary { border-bottom: 1px solid var(--border-soft); }
+.context-note pre { padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 320px; overflow-y: auto; background: var(--code-bg); border-radius: 6px; font-size: 12px; }
+.error-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 14px 18px; margin-bottom: 20px; border-radius: 10px; color: var(--danger-text); background: var(--danger-bg); font-size: 13px; }
+.error-notice p { margin: 0; flex: 1; min-width: 0; }
+.feedback-card { margin-top: 12px; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.feedback-card h3 { margin: 0 0 14px; font-size: 16px; }
+.feedback-card label { display: block; margin-bottom: 8px; color: var(--text-secondary); font-size: 13px; }
 .feedback-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .feedback-footer p { margin: 0; color: var(--text-muted); font-size: 12px; }
-.revocation-note { padding: 12px; margin: 0 0 16px; border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 13px; }
-.feedback-error { color: var(--danger-text); margin-bottom: 0; }
-.loading-state { display: flex; flex-direction: column; gap: 24px; }
+.revocation-note { padding: 10px 12px; margin: 0 0 14px; border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 13px; }
+.feedback-error { color: var(--danger-text); margin: 10px 0 0; font-size: 12px; }
+.loading-state { display: flex; flex-direction: column; gap: 20px; }
 .timeline-end { height: 1px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-@media (max-width: 768px) { h1 { font-size: 23px; } .conversation-heading { flex-wrap: wrap; gap: 12px; } .source-card, .feedback-card, .message-card { padding: 16px; } .source-row { align-items: flex-start; } .source-row a { flex: 1; min-width: 0; } .source-row code { flex-basis: calc(100% - 82px); } .source-row .n-button { margin-left: 68px; } }
+@media (max-width: 768px) {
+  h1 { font-size: 21px; }
+  .task-heading { flex-wrap: wrap; gap: 12px; }
+  .next-step { padding: 16px; flex-wrap: wrap; }
+  .next-step > button { margin-left: 34px; }
+  .history-block > ol, .context-note > p, .context-note > ul, .context-note > details { margin-left: 16px; margin-right: 16px; }
+  .feedback-card, .message-card { padding: 16px; }
+}
 </style>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NForm, NFormItem, NInput, NSelect, NSpin } from 'naive-ui'
-import { Check, KeyRound, RefreshCw, Server } from '@lucide/vue'
+import { KeyRound, RefreshCw } from '@lucide/vue'
 import { getSettings, refreshModels, updateModelSettings, type ModelSettings } from '../api/settings'
 
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -123,15 +123,15 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
 </script>
 
 <template>
-  <section class="panel" aria-labelledby="model-settings-title">
-    <div class="panel-heading"><h2 id="model-settings-title">模型服务</h2><p class="description">选择用于生成方案和代码变更的模型。</p></div>
+  <section class="panel">
+    <p class="description">选择用于生成方案和代码变更的模型。</p>
     <div v-if="loading" role="status"><NSpin size="small" /> 正在读取模型设置…</div>
     <NAlert v-if="error" type="error" role="alert" class="feedback">{{ error }}</NAlert>
     <NAlert v-if="notice" type="info" role="status" class="feedback">{{ notice }}</NAlert>
     <NButton v-if="!loading && !loaded" attr-type="button" :disabled="loading" @click="load">重新读取</NButton>
     <NForm v-if="loaded" label-placement="top" @submit.prevent="save">
       <section class="settings-card" aria-labelledby="connection-title">
-        <div class="card-heading"><span class="card-icon"><Server :size="19" aria-hidden="true" /></span><div><h3 id="connection-title">服务连接</h3><p class="help">输入服务地址和访问密钥。</p></div></div>
+        <div class="card-heading"><h3 id="connection-title">服务连接</h3><p class="help">输入服务地址和访问密钥。</p></div>
         <NFormItem label="服务地址" :label-props="{ for: 'base-url' }">
           <div class="field-content"><NInput :value="settings.base_url" :disabled="saving" :input-props="{ id: 'base-url', autocomplete: 'url', spellcheck: false }" placeholder="https://api.openai.com/v1" @update:value="settings.base_url = $event" /><p class="help">填写 OpenAI 兼容服务的基础地址，通常以 <code>/v1</code> 结尾。</p></div>
         </NFormItem>
@@ -141,24 +141,21 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
         </NFormItem>
       </section>
       <section class="settings-card" aria-labelledby="selection-title">
-        <div class="card-heading"><span class="card-icon"><Check :size="19" aria-hidden="true" /></span><div><h3 id="selection-title">选择模型</h3><p class="help">先获取模型列表，再选择并保存。</p></div></div>
+        <div class="card-heading"><h3 id="selection-title">选择模型</h3><p class="help">先获取模型列表，再选择并保存。</p></div>
         <NFormItem label="模型" :label-props="{ id: 'model-label', for: 'model' }">
           <div class="model-row"><NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="请先获取模型" @update:value="settings.model = $event ?? ''" /><NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="16" aria-hidden="true" /></template>获取模型</NButton></div>
         </NFormItem>
       </section>
-      <div class="actions"><p class="help">设置由整个工作台共享。</p><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存模型设置</NButton></div>
+      <div class="actions"><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存模型设置</NButton></div>
     </NForm>
   </section>
 </template>
 
 <style scoped>
-.panel-heading { margin-bottom: 24px; }
-h2 { margin: 0; font-size: 23px; line-height: 1.4; }
-.description { margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; }
+.description { margin: 0 0 20px; color: var(--text-secondary); font-size: 13px; }
 h3 { margin: 0; font-size: 15px; }
 .settings-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; background: var(--surface); }
-.card-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
-.card-icon { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px; color: var(--accent); background: var(--accent-soft); }
+.card-heading { margin-bottom: 22px; }
 .help { color: var(--text-secondary); margin: 6px 0 0; font-size: 12px; line-height: 1.6; }
 .field-content, .model-row { width: 100%; min-width: 0; }
 .model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }

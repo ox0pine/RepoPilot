@@ -146,40 +146,34 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <section class="new-conversation" aria-labelledby="new-conversation-title">
-    <a class="back-link" href="/app" @click="followLink($event, '/app')"><ArrowLeft :size="16" aria-hidden="true" />返回工作台</a>
+  <section class="new-task" aria-labelledby="new-task-title">
+    <a class="back-link" href="/app" @click="followLink($event, '/app')"><ArrowLeft :size="16" aria-hidden="true" />返回任务列表</a>
     <header class="page-header">
-      <p class="eyebrow">从 Issue 开始</p>
-      <h1 id="new-conversation-title">新建任务</h1>
+      <h1 id="new-task-title">新建任务</h1>
       <p class="description">固定代码版本和 Issue，生成方案并在审阅后执行。</p>
     </header>
-    <ol class="creation-steps" aria-label="任务流程">
-      <li aria-current="step"><span class="step-number">1</span><span>确定来源</span></li>
-      <li><span class="step-number">2</span><span>审阅并批准方案</span></li>
-      <li><span class="step-number">3</span><span>执行并交付</span></li>
-    </ol>
     <form class="source-form" novalidate :aria-busy="creating" @submit.prevent="submit">
-      <div class="form-intro"><div><h2>任务来源</h2><p>选择仓库、代码版本与 Issue，作为方案和执行的依据。</p></div><span class="source-badge"><GitBranch :size="14" aria-hidden="true" />GitHub</span></div>
+      <div class="form-intro"><div><h2>任务来源</h2><p>选择仓库、代码版本与 Issue，作为方案和执行的依据。</p></div></div>
       <section v-if="requestError && needsSettings" class="configuration-notice" role="alert" aria-labelledby="configuration-title">
         <CircleAlert :size="20" class="notice-icon" aria-hidden="true" />
         <div class="notice-content"><h3 id="configuration-title">需要配置 GitHub 访问权限</h3><p>{{ requestError }}</p><p class="notice-hint">已保留当前填写内容。保存设置后可直接重试。</p></div>
         <NButton attr-type="button" class="settings-button" aria-haspopup="dialog" @click="emit('settings')"><template #icon><Settings :size="16" aria-hidden="true" /></template>打开设置</NButton>
       </section>
       <div class="field">
-        <div class="field-heading"><label for="conversation-repository"><GitBranch :size="16" aria-hidden="true" />仓库链接</label><span class="field-tag">HTTPS</span></div>
-        <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'conversation-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" @blur="validate('repository_url')" />
+        <div class="field-heading"><label for="task-repository"><GitBranch :size="16" aria-hidden="true" />仓库链接</label></div>
+        <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'task-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" @blur="validate('repository_url')" />
         <p id="repository-help" class="field-help">GitHub 仓库主页地址。私有仓库需要相应的 GitHub token 权限。</p>
         <p v-if="errors.repository_url" id="repository-error" class="field-error" role="alert">{{ errors.repository_url }}</p>
       </div>
       <div class="field">
-        <div class="field-heading"><label for="conversation-commit"><GitCommitHorizontal :size="16" aria-hidden="true" />代码版本</label><span class="field-tag">完整 commit SHA</span></div>
-        <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="粘贴 40 位 commit SHA" :input-props="{ id: 'conversation-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
+        <div class="field-heading"><label for="task-commit"><GitCommitHorizontal :size="16" aria-hidden="true" />代码版本</label></div>
+        <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="粘贴 40 位 commit SHA" :input-props="{ id: 'task-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
         <p id="commit-help" class="field-help">填写完整 commit SHA。任务每次执行都从此版本重新开始。</p>
         <p v-if="errors.baseline_commit" id="commit-error" class="field-error" role="alert">{{ errors.baseline_commit }}</p>
       </div>
       <div class="field">
-        <div class="field-heading"><label for="conversation-issue"><Link :size="16" aria-hidden="true" />Issue 链接</label><span class="field-tag">同一仓库</span></div>
-        <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'conversation-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" @blur="validate('issue_url')" />
+        <div class="field-heading"><label for="task-issue"><Link :size="16" aria-hidden="true" />Issue 链接</label></div>
+        <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'task-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" @blur="validate('issue_url')" />
         <p id="issue-help" class="field-help">Issue 必须属于上述仓库，暂不支持 Pull Request。更换来源请新建任务。</p>
         <p v-if="errors.issue_url" id="issue-error" class="field-error" role="alert">{{ errors.issue_url }}</p>
       </div>
@@ -198,31 +192,23 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-.new-conversation { width: 100%; max-width: 800px; margin: 0 auto; padding: 0 0 32px; min-width: 0; overflow-wrap: anywhere; }
+.new-task { width: 100%; max-width: 800px; margin: 0 auto; padding: 0 0 32px; min-width: 0; overflow-wrap: anywhere; }
 .back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); text-decoration: none; min-height: 36px; font-size: 13px; }
 .back-link:hover { color: var(--accent); }
 .back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
-.page-header { margin: 18px 0 22px; }
-.eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 12px; font-weight: 600; }
-h1 { margin: 0 0 10px; font-size: clamp(26px, 3vw, 32px); font-weight: 650; line-height: 1.3; letter-spacing: -0.025em; }
+.page-header { margin: 14px 0 20px; }
+h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.35; }
 .description { margin: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
-.creation-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0; margin: 0 0 24px; list-style: none; }
-.creation-steps li { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 12px; }
-.creation-steps li[aria-current] { color: var(--accent); font-weight: 600; }
-.step-number { display: inline-flex; flex: 0 0 24px; width: 24px; height: 24px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 50%; font-size: 11px; }
-[aria-current] .step-number { color: var(--surface); background: var(--accent); border-color: var(--accent); }
 .source-form { padding: 24px 28px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
-.form-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 20px; margin-bottom: 22px; border-bottom: 1px solid var(--border-soft); }
+.form-intro { padding-bottom: 20px; margin-bottom: 22px; border-bottom: 1px solid var(--border-soft); }
 h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
 .form-intro p { margin: 0; font-size: 12px; line-height: 1.7; color: var(--text-secondary); }
-.source-badge { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 4px 9px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-secondary); font-size: 11px; }
 .field { margin-bottom: 22px; min-width: 0; }
-.field-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.field-heading { margin-bottom: 8px; }
 .field label { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
 .field label svg { color: var(--text-muted); }
-.field-tag { color: var(--text-muted); font-size: 11px; text-align: right; }
 .field :deep(.n-input) { min-height: 42px; }
-.commit-input :deep(input) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.commit-input :deep(input) { font-family: var(--font-mono); font-size: 12px; }
 .field-help, .field-error { margin: 7px 0 0; font-size: 12px; line-height: 1.6; }
 .field-help { color: var(--text-muted); }
 .field-error { color: var(--danger-text); }
@@ -243,6 +229,6 @@ h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
 .submit-button { min-height: 42px; flex-shrink: 0; }
 .submission-status { margin: 12px 0 0; color: var(--text-secondary); font-size: 13px; }
 .submission-status:empty { display: none; }
-@media (max-width: 768px) { .new-conversation { padding: 0 0 24px; } .page-header { margin-top: 14px; } .source-form { padding: 20px; } .creation-steps { gap: 8px; } }
-@media (max-width: 560px) { .source-form { padding: 20px 16px; } .form-intro { gap: 10px; } .creation-steps li { flex-direction: column; align-items: flex-start; gap: 6px; font-size: 11px; } .form-footer { flex-direction: column; align-items: stretch; gap: 16px; } .submit-button { width: 100%; min-height: 44px; } .configuration-notice { flex-wrap: wrap; } .notice-content { flex-basis: calc(100% - 32px); } .settings-button { margin-left: 32px; } }
+@media (max-width: 768px) { .new-task { padding: 0 0 24px; } .page-header { margin-top: 10px; } .source-form { padding: 20px; } }
+@media (max-width: 560px) { .source-form { padding: 20px 16px; } .form-footer { flex-direction: column; align-items: stretch; gap: 16px; } .submit-button { width: 100%; min-height: 44px; } .configuration-notice { flex-wrap: wrap; } .notice-content { flex-basis: calc(100% - 32px); } .settings-button { margin-left: 32px; } }
 </style>

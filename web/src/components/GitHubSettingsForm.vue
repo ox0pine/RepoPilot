@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, NTag, type InputInst } from 'naive-ui'
-import { Copy, KeyRound, GitBranch } from '@lucide/vue'
+import { Copy } from '@lucide/vue'
 import { ApiError } from '../api/client'
 import { authorizeGitHubSettings, getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
 import { sessionVersion } from '../stores/session'
@@ -173,11 +173,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="github-settings" aria-labelledby="github-settings-title">
-    <header class="section-heading">
-      <h2 id="github-settings-title"><GitBranch :size="22" aria-hidden="true" /> GitHub</h2>
-      <p>配置仓库读取与修复分支交付所需的 GitHub 凭据。</p>
-    </header>
+  <section class="github-settings">
+    <p class="description">配置仓库读取与修复分支交付所需的 GitHub 凭据。</p>
 
     <div v-if="loading" class="loading-state" role="status"><NSpin size="small" /> 正在读取 GitHub 配置…</div>
     <NAlert v-if="loadError" type="error" role="alert" class="feedback">{{ loadError }}</NAlert>
@@ -210,7 +207,7 @@ onBeforeUnmount(() => {
 
         <div class="permission-guide">
           <h4>授予所需仓库权限</h4>
-          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token ↗</a>，仅选择你自己的目标仓库，并设置：</p>
+          <p class="help"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">创建 Fine-grained token</a>，仅选择你自己的目标仓库，并设置：</p>
           <div class="permission-list"><span>Contents <strong>读取；交付分支需读写</strong></span><span>Issues <strong>只读</strong></span></div>
           <p class="help">修复分支只能推送到 token 所属用户自己的仓库。推送后仍需你在 GitHub 审查并手动合并。</p>
           <details class="classic-guide"><summary>使用 Classic token</summary><p class="help">私有仓库通常需要 <strong>repo</strong> scope，权限范围更广。建议优先使用限定仓库的 Fine-grained token。</p></details>
@@ -221,7 +218,7 @@ onBeforeUnmount(() => {
       <NCollapse class="advanced-settings">
         <NCollapseItem title="SSH 公钥" name="ssh">
           <section class="settings-card advanced-card" aria-labelledby="ssh-settings-title">
-            <h3 id="ssh-settings-title"><KeyRound :size="18" aria-hidden="true" /> SSH 克隆</h3>
+            <h3 id="ssh-settings-title">SSH 克隆</h3>
             <p class="help">保存 token 时会生成 SSH 密钥对，后续克隆使用此密钥。首次执行前，请将公钥添加到 GitHub；保存 token 不会自动注册公钥。</p>
             <p class="help">{{ saved.public_key && saved.private_key_configured ? '本地密钥对已保存。请确认公钥已在 GitHub 注册。' : '保存 token 后会生成本地密钥对。' }}</p>
             <template v-if="saved.public_key">
@@ -244,12 +241,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .github-settings { min-width: 0; }
-.section-heading { margin-bottom: 24px; }
-h2, h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
-h2 { font-size: 23px; line-height: 1.4; }
+h3 { margin: 0; }
 h3 { font-size: 15px; }
 h4 { margin: 0 0 8px; font-size: 13px; }
-.section-heading > p { margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.description { margin: 0 0 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .settings-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .card-heading :deep(.n-tag) { flex-shrink: 0; }

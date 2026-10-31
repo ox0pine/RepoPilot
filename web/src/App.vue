@@ -2,7 +2,6 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { NConfigProvider, zhCN, dateZhCN } from 'naive-ui'
 import { themeOverrides } from './styles/theme'
-import HomeView from './views/HomeView.vue'
 import AuthView from './views/AuthView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
 import { authenticate } from './api/auth'
@@ -42,7 +41,7 @@ function logout(): void {
   clearSession()
   authError.value = ''
   authLoading.value = false
-  navigate('/')
+  navigate('/auth')
 }
 
 onUnauthorized(syncRoute)
@@ -53,8 +52,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncRoute))
 <template>
   <NConfigProvider :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
   <a class="skip-link" href="#main">跳到主要内容</a>
-  <HomeView v-if="route === '/'" @navigate-auth="navigate(sessionToken ? '/app' : '/auth')" />
-  <AuthView v-else-if="route === '/auth'" :error="authError" :loading="authLoading" @authenticated="login" @home="navigate('/')" />
-  <WorkspaceView v-else-if="sessionToken" @logout="logout" />
+  <WorkspaceView v-if="sessionToken && route !== '/auth'" @logout="logout" />
+  <AuthView v-else :error="authError" :loading="authLoading" @authenticated="login" />
   </NConfigProvider>
 </template>

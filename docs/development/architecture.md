@@ -17,6 +17,6 @@ deploy/               # Dockerfile 与 Nginx 配置
 docs/                 # 配置、使用、运维与开发文档
 ```
 
-后端沿用 FastAPI → 应用服务 → 领域契约与基础设施分层，`api/app.py:create_app` 是组合根。前端使用 composition API、轻量自定义路由和模块级 reactive stores，不引入 Vue Router 或 Pinia。`reference/` 是忽略的参考材料，不作为应用导入来源。
+后端沿用 FastAPI → 应用服务 → 领域契约与基础设施分层，`api/app.py:create_app` 是组合根。前端使用 composition API、轻量自定义路由和模块级 reactive stores，不引入 Vue Router 或 Pinia。视图按产品词汇命名（`TaskListView`、`NewTaskView`、`TaskDetailView`），根路径 `/` 只做登录或任务列表的重定向，没有独立介绍页。`reference/` 是忽略的参考材料，不作为应用导入来源。
 
 PostgreSQL 是业务数据的权威存储；Redis 仅缓存模型列表。API 创建排队记录，单个 Worker 在数据库事务外执行 Docker 任务。每次执行从固定 commit 开始，批准、执行、修复分支交付是分开的操作。

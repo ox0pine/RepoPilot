@@ -1,7 +1,7 @@
 # RepoPilot
 
 <p align="center">
-  <img src="web/public/images/repopilot-logo.jpg" alt="RepoPilot Logo" width="160">
+  <img src="web/public/images/repopilot-logo.png" alt="RepoPilot Logo" width="160">
 </p>
 
 <h3 align="center">🤖 从 GitHub Issue 到可审阅的代码变更</h3>

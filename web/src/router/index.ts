@@ -17,10 +17,13 @@ export function navigate(path: string, replace = false): void {
   if (target.origin !== window.location.origin) return
   if (target.pathname === '/app/settings') target.pathname = '/app'
   let destination = target.pathname + target.search
-  if (isWorkspacePath(target.pathname) && !sessionToken.value) {
+  if (target.pathname === '/' || target.pathname === '/auth') {
+    // There is no public landing page: the login screen is the entry point.
+    destination = sessionToken.value ? '/app' : '/auth'
+  } else if (isWorkspacePath(target.pathname) && !sessionToken.value) {
     destination = `/auth?redirect=${encodeURIComponent(destination)}`
-  } else if (!isWorkspacePath(target.pathname) && target.pathname !== '/auth' && target.pathname !== '/') {
-    destination = '/'
+  } else if (!isWorkspacePath(target.pathname)) {
+    destination = sessionToken.value ? '/app' : '/auth'
   }
   window.history[replace ? 'replaceState' : 'pushState']({}, '', destination)
   route.value = window.location.pathname

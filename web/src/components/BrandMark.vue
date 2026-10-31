@@ -1,6 +1,6 @@
 <template>
   <span class="brand-mark">
-    <img src="/images/repopilot-logo.jpg" alt="" width="28" height="28">
+    <img src="/images/repopilot-logo.png" alt="" width="28" height="28">
     RepoPilot
   </span>
 </template>
