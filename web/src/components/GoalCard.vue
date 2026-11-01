@@ -72,7 +72,7 @@ li + li { margin-top: 4px; }
 .question-warning h3 { display: flex; align-items: center; gap: 6px; color: inherit; }
 .question-warning p { margin-bottom: 8px; font-size: 13px; }
 /* The approve action must stay visible while the plan is being read. */
-.goal-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border-soft); border-radius: 0 0 11px 11px; background: var(--surface); }
+.goal-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border-soft); border-radius: 0 0 11px 11px; background: var(--surface-hover); box-shadow: var(--shadow-bar); }
 .goal-actions p { color: var(--text-muted); font-size: 12px; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .feedback-chevron { margin-left: 4px; transition: transform var(--dur-base) var(--ease); }

@@ -16,6 +16,7 @@ const light: Record<string, string> = {
   'diff-add-bg': '#eef7f1', 'diff-add-mark': '#cfe9da',
   'diff-del-bg': '#fdf0f0', 'diff-del-mark': '#f4dcdc',
   'shadow-float': '0 8px 24px rgba(32, 38, 49, .08)',
+  'shadow-bar': '0 -6px 16px rgba(32, 38, 49, .06)',
 }
 
 const dark: Record<string, string> = {
@@ -30,6 +31,7 @@ const dark: Record<string, string> = {
   'diff-add-bg': '#132520', 'diff-add-mark': '#1c3a2c',
   'diff-del-bg': '#2a181a', 'diff-del-mark': '#3b2123',
   'shadow-float': '0 8px 24px rgba(0, 0, 0, .55)',
+  'shadow-bar': '0 -6px 16px rgba(0, 0, 0, .45)',
 }
 
 const palettes: Record<ColorScheme, Record<string, string>> = { light, dark }

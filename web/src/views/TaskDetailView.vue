@@ -379,7 +379,7 @@ h1 { margin: 0 0 8px; font-size: 26px; font-weight: 500; line-height: 1.3; }
 .task-meta a:focus-visible, .commit code:focus-visible { border-radius: 4px; }
 .task-meta .ident { color: var(--text-secondary); }
 .task-meta .ident:hover { background: var(--border-soft); }
-.separator { color: var(--border); }
+.separator { color: var(--text-muted); }
 .commit { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 code { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); overflow-wrap: anywhere; min-width: 0; }
 .task-heading > .status { flex-shrink: 0; margin-top: 8px; }

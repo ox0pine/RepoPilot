@@ -25,6 +25,11 @@ RepoPilot 是面向 Python、React 和 Vue 仓库的自托管 AI 编码工作台
 
 适合希望先审方案、再执行修改，并保留检查记录与人工交付环节的仓库维护者。
 
+<p align="center">
+  <img src="docs/images/workbench-diff.png" alt="RepoPilot 审阅页：执行状态、检查通过情况，以及按文件分组并标注行号与增删的代码差异" width="100%">
+</p>
+<p align="center"><sub>审阅页：执行状态、检查结果与按文件分组的代码差异在同一屏，确认后才交付分支</sub></p>
+
 ## ✨ 功能特性
 
 - **固定来源**：校验 GitHub 仓库、完整 commit SHA 和同仓库 Issue，保存不可变的来源快照与有限源码上下文。

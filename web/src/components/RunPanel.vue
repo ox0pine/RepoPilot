@@ -491,7 +491,10 @@ pre { padding: 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; 
   .check-record > summary { grid-template-columns: minmax(0, 1fr) auto; }
   .check-phase { display: none; }
   .check-record > pre { margin-left: 0; }
-  .diff-line { grid-template-columns: 40px minmax(0, 1fr); }
+  /* A phone reads better with wrapped lines than with sideways scrolling. */
+  .diff-line { grid-template-columns: 40px minmax(0, 1fr); width: auto; min-width: 0; }
+  .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .diff-hunk-head { white-space: pre-wrap; overflow-wrap: anywhere; }
   .diff-gutter { display: block; }
   .diff-gutter > .diff-no:not(.diff-no-compact), .diff-sign { display: none; }
   .diff-no-compact { display: block; }

@@ -6,6 +6,17 @@
 
 ## 未发布
 
+### 截图复核后的三处修正
+
+- 批准吸底栏改用 `--surface-hover` 并加 `--shadow-bar` 投影：与白卡片同色时，滚动中的方案文字看起来像被截断而不是被浮层盖住。
+- 元信息分隔点由边线色改为 `--text-muted`，12px 下 `·` 原本几乎不可见。
+- 窄屏代码差异长行改为折行：超过 640px 时仍用单列行号，但 `white-space: pre-wrap` 并取消 `max-content` 行宽，手机上不再需要横向拖动才能读完一行。
+
+### 文档：README 增加审阅页截图
+
+- 新增 `docs/images/workbench-diff.png`（1280×820），放在项目简介之后，展示执行状态、检查通过情况与按文件分组的代码差异。
+- 验证：README 中的相对路径指向已存在的文件，GitHub 渲染宽度下无横向溢出；截图取自真实前端构建，数据为临时 stub 生成的示例内容。
+
 ### 深色主题、列表筛选与长页面导航
 
 - 深色主题：`styles/theme.ts` 改为 light/dark 两套调色板，新增 `--on-accent`（主操作上的文字）与 `--shadow-float`（按方案取值，深色下不是浅色阴影）；`styles/scheme.ts` 跟随系统 `prefers-color-scheme`，`App.vue` 同步切换 Naive 的 `darkTheme`。`index.html` 在样式加载前先绘制页面背景，深色窗口不会先白闪。
