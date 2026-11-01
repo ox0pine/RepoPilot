@@ -8,7 +8,7 @@ from repopilot.api.security import require_auth
 from repopilot.application.tasks import TaskService
 from repopilot.domain.tasks import (
     ApproveGoalRequest, CreateTask, GenerateGoalRequest, TaskDetail, TaskError,
-    TaskList, TaskStats,
+    TaskList, TaskStats, TaskStatus,
 )
 
 
@@ -26,8 +26,11 @@ def build_router(service: TaskService) -> APIRouter:
         return await operation(service.create(payload))
 
     @router.get('', response_model=TaskList)
-    async def list_tasks(limit: int = Query(10, ge=1, le=50), cursor: str | None = None) -> TaskList:
-        return await operation(service.list(limit, cursor))
+    async def list_tasks(
+        limit: int = Query(10, ge=1, le=50), cursor: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> TaskList:
+        return await operation(service.list(limit, cursor, status))
 
     @router.get('/stats', response_model=TaskStats)
     async def task_stats() -> TaskStats:

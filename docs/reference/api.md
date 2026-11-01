@@ -10,7 +10,7 @@
 | `POST /api/models/refresh` | 获取模型列表 |
 | `GET /api/settings/github`、`PUT /api/settings/github` | GitHub 凭据摘要与保存 |
 | `POST /api/settings/github/authorize` | 显式注册 SSH 公钥 |
-| `POST /api/tasks`、`GET /api/tasks` | 创建与分页读取对话 |
+| `POST /api/tasks`、`GET /api/tasks` | 创建与分页读取对话；`GET` 支持 `limit`、`cursor` 与 `status`（按任务状态筛选，非法值返回 422） |
 | `GET /api/tasks/stats`、`GET /api/tasks/{id}` | 统计与详情 |
 | `POST /api/tasks/{id}/goal` | 生成、修改或重试 Goal，携带 `expected_revision` |
 | `POST /api/tasks/{id}/approve` | 批准最新 `goal_version`，携带 `expected_revision` |

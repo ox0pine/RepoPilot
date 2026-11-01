@@ -135,7 +135,7 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
         <NFormItem label="服务地址" :label-props="{ for: 'base-url' }">
           <div class="field-content"><NInput :value="settings.base_url" :disabled="saving" :input-props="{ id: 'base-url', autocomplete: 'url', spellcheck: false }" placeholder="https://api.openai.com/v1" @update:value="settings.base_url = $event" /><p class="help">填写 OpenAI 兼容服务的基础地址，通常以 <code>/v1</code> 结尾。</p></div>
         </NFormItem>
-        <div v-if="usingSavedKey && !apiKeyEditing" class="saved-key"><KeyRound :size="18" aria-hidden="true" /><div><strong>API Key 已保存</strong><p class="help">密钥不会回显。</p></div><NButton ref="changeKeyButton" attr-type="button" :disabled="saving" @click="startApiKeyEdit">更换</NButton></div>
+        <div v-if="usingSavedKey && !apiKeyEditing" class="saved-key"><KeyRound :size="16" :stroke-width="1.5" aria-hidden="true" /><div><strong>API Key 已保存</strong><p class="help">密钥不会回显。</p></div><NButton size="small" ref="changeKeyButton" attr-type="button" :disabled="saving" @click="startApiKeyEdit">更换</NButton></div>
         <NFormItem v-else label="API Key" :label-props="{ for: 'api-key' }">
           <div class="field-content"><NInput ref="keyInput" v-model:value="apiKey" type="password" show-password-on="click" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false }" placeholder="输入访问密钥；免密服务可留空" /><div class="key-help"><p class="help">{{ usingSavedKey ? '留空将保留当前密钥。' : '密钥仅用于当前服务；免密服务可留空。' }}</p><NButton v-if="usingSavedKey && apiKeyEditing" text attr-type="button" :disabled="saving" @click="cancelApiKeyEdit">取消更换</NButton></div></div>
         </NFormItem>
@@ -143,7 +143,7 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
       <section class="settings-card" aria-labelledby="selection-title">
         <div class="card-heading"><h3 id="selection-title">选择模型</h3><p class="help">先获取模型列表，再选择并保存。</p></div>
         <NFormItem label="模型" :label-props="{ id: 'model-label', for: 'model' }">
-          <div class="model-row"><NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="请先获取模型" @update:value="settings.model = $event ?? ''" /><NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="16" aria-hidden="true" /></template>获取模型</NButton></div>
+          <div class="model-row"><NSelect :value="settings.model || null" :options="models.map(model => ({ label: model, value: model }))" filterable clearable :disabled="saving || refreshing" :input-props="{ id: 'model', 'aria-labelledby': 'model-label' }" placeholder="请先获取模型" @update:value="settings.model = $event ?? ''" /><NButton attr-type="button" :disabled="saving || refreshing || !settings.base_url.trim()" :loading="refreshing" @click="refresh"><template #icon><RefreshCw :size="16" :stroke-width="1.5" aria-hidden="true" /></template>获取模型</NButton></div>
         </NFormItem>
       </section>
       <div class="actions"><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving || refreshing || !settings.base_url.trim() || !models.includes(settings.model)">保存模型设置</NButton></div>
@@ -153,22 +153,22 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; em
 
 <style scoped>
 .description { margin: 0 0 20px; color: var(--text-secondary); font-size: 13px; }
-h3 { margin: 0; font-size: 15px; }
+h3 { margin: 0; font-size: 15px; font-weight: 500; }
 .settings-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; background: var(--surface); }
-.card-heading { margin-bottom: 22px; }
-.help { color: var(--text-secondary); margin: 6px 0 0; font-size: 12px; line-height: 1.6; }
+.card-heading { margin-bottom: 20px; }
+.help { color: var(--text-secondary); margin: 8px 0 0; font-size: 13px; line-height: 1.7; }
 .field-content, .model-row { width: 100%; min-width: 0; }
 .model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.saved-key { display: flex; align-items: center; gap: 12px; padding: 14px; background: var(--bg); border-radius: 10px; }
+.saved-key { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg); border-radius: 8px; }
 .saved-key > svg { flex-shrink: 0; color: var(--text-muted); }
 .saved-key > div { flex: 1; min-width: 0; }
 .saved-key strong { font-size: 13px; font-weight: 500; }
-.saved-key .help { margin-top: 3px; }
+.saved-key .help { margin-top: 4px; }
 .key-help { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.key-help > button { margin-top: 6px; flex-shrink: 0; }
+.key-help > button { margin-top: 8px; flex-shrink: 0; }
 .actions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
 .actions .help { margin: 0; }
 .feedback { margin-bottom: 16px; overflow-wrap: anywhere; }
-code { background: var(--code-bg); border-radius: 4px; padding: 2px 4px; }
+code { background: var(--surface-hover); border-radius: 4px; padding: 1px 4px; font-size: 12px; }
 @media (max-width: 640px) { .settings-card { padding: 16px; } .model-row { grid-template-columns: 1fr; } .saved-key { flex-wrap: wrap; } .actions > button { width: 100%; } }
 </style>

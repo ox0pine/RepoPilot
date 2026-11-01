@@ -25,8 +25,8 @@ const sections = computed(() => [
 <template>
   <article class="goal-card" :aria-label="`方案版本 ${goal.version}${current ? '，当前版本' : '，历史版本'}`">
     <header class="goal-heading">
-      <span class="goal-title">方案 v{{ goal.version }}</span>
-      <span v-if="approved && !current" class="approved-label">已批准</span>
+      <span class="goal-title">方案 <span class="ident">v{{ goal.version }}</span></span>
+      <span v-if="approved && !current" class="status" data-tone="success">已批准</span>
     </header>
     <div class="goal-content">
       <section><h3>方案概述</h3><p class="goal-summary">{{ goal.content.summary }}</p></section>
@@ -37,7 +37,7 @@ const sections = computed(() => [
         <p v-else class="empty-section">暂无</p>
       </section>
       <section v-if="goal.content.open_questions.length" class="question-warning">
-        <h3><CircleAlert :size="17" aria-hidden="true" />待确认事项</h3>
+        <h3><CircleAlert :size="16" :stroke-width="1.5" aria-hidden="true" />待确认事项</h3>
         <p>请先确认以下问题；需要补充信息时，可提出修改。</p>
         <ul><li v-for="(question, index) in goal.content.open_questions" :key="index">{{ question }}</li></ul>
       </section>
@@ -48,33 +48,34 @@ const sections = computed(() => [
       <p v-else>方案已批准，执行记录见下方。</p>
       <div class="buttons">
         <NButton v-if="canApprove" type="primary" :disabled="busy" :loading="busy" @click="emit('approve')">批准并执行</NButton>
-        <NButton v-if="canRevise" :disabled="busy" :aria-expanded="feedbackOpen" aria-controls="goal-feedback-panel" @click="emit('revise')">{{ feedbackOpen ? '收起修改' : '提出修改' }}<ChevronDown :size="15" class="feedback-chevron" :class="{ expanded: feedbackOpen }" aria-hidden="true" /></NButton>
+        <NButton v-if="canRevise" :disabled="busy" :aria-expanded="feedbackOpen" aria-controls="goal-feedback-panel" @click="emit('revise')">{{ feedbackOpen ? '收起修改' : '提出修改' }}<ChevronDown :size="16" :stroke-width="1.5" class="feedback-chevron" :class="{ expanded: feedbackOpen }" aria-hidden="true" /></NButton>
       </div>
     </footer>
   </article>
 </template>
 
 <style scoped>
-.goal-card { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; overflow-wrap: anywhere; }
-.goal-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--border-soft); }
-.goal-title { font-weight: 600; }
-.approved-label { border-radius: 6px; padding: 2px 8px; background: var(--success-bg); color: var(--success-text); font-size: 12px; }
+.goal-card { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
+.goal-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--border-soft); }
+.goal-title { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; }
 .goal-content { padding: 20px; }
 section + section { margin-top: 20px; }
-h3 { margin: 0 0 8px; color: var(--text); font-size: 15px; }
+h3 { margin: 0 0 8px; color: var(--text-secondary); font-size: 13px; font-weight: 500; letter-spacing: .01em; }
 p { margin: 0; }
+.goal-summary { font-size: 14px; line-height: 1.75; }
 .goal-summary, li { white-space: pre-wrap; }
-ul, ol { margin: 0; padding-left: 22px; }
-li + li { margin-top: 6px; }
-.empty-section { color: var(--text-muted); }
+ul, ol { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.75; }
+li + li { margin-top: 4px; }
+.empty-section { color: var(--text-muted); font-size: 13px; }
 .no-questions { margin-top: 20px; color: var(--text-muted); font-size: 13px; }
 .question-warning { padding: 16px; border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); }
-.question-warning h3 { display: flex; align-items: center; gap: 8px; color: inherit; }
-.question-warning p { margin-bottom: 10px; font-size: 13px; }
-.goal-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-top: 1px solid var(--border-soft); background: var(--surface); }
+.question-warning h3 { display: flex; align-items: center; gap: 6px; color: inherit; }
+.question-warning p { margin-bottom: 8px; font-size: 13px; }
+/* The approve action must stay visible while the plan is being read. */
+.goal-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border-soft); border-radius: 0 0 11px 11px; background: var(--surface); }
 .goal-actions p { color: var(--text-muted); font-size: 12px; }
-.buttons { display: flex; flex-wrap: wrap; gap: 10px; }
-.feedback-chevron { margin-left: 6px; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.feedback-chevron { margin-left: 4px; transition: transform var(--dur-base) var(--ease); }
 .feedback-chevron.expanded { transform: rotate(180deg); }
 @media (max-width: 480px) { .goal-heading, .goal-content, .goal-actions { padding: 16px; } }
 </style>

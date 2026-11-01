@@ -3,9 +3,19 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
     <meta name="description" content="自托管的 AI 编码工作台：固定 commit 与 Issue，人工批准后在隔离环境中执行修改，审阅后交付修复分支。">
     <link rel="icon" type="image/png" href="/images/repopilot-logo.png">
     <title>RepoPilot</title>
+    <!-- Paint the page background before styles load so a dark window never flashes white. -->
+    <style>html{background:#f6f7f9}@media (prefers-color-scheme:dark){html{background:#0e1116}}</style>
+    <script>
+      try {
+        var saved = localStorage.getItem('repopilot.theme')
+        var dark = saved === 'dark' || (saved !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.style.background = dark ? '#0e1116' : '#f6f7f9'
+      } catch (error) {}
+    </script>
   </head>
   <body>
     <div id="app"></div>

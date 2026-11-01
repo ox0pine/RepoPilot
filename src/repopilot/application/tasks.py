@@ -5,7 +5,7 @@ from uuid import UUID
 
 from repopilot.domain.tasks import (
     ApproveGoalRequest, CreateTask, GenerateGoalRequest, TaskDetail, TaskError,
-    TaskList, TaskStats,
+    TaskList, TaskStats, TaskStatus,
 )
 from repopilot.integration.goals import GoalClient
 from repopilot.integration.task_sources import GitHubSourceClient
@@ -44,8 +44,10 @@ class TaskService:
     async def detail(self, task_id: UUID) -> TaskDetail:
         return await self.repository.detail(task_id)
 
-    async def list(self, limit: int = 10, cursor: str | None = None) -> TaskList:
-        return await self.repository.list(limit, cursor)
+    async def list(
+        self, limit: int = 10, cursor: str | None = None, status: TaskStatus | None = None,
+    ) -> TaskList:
+        return await self.repository.list(limit, cursor, status)
 
     async def stats(self) -> TaskStats:
         return await self.repository.stats()

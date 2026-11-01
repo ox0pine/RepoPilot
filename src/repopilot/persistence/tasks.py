@@ -20,6 +20,7 @@ from repopilot.domain.tasks import (
     TaskList,
     TaskMessage,
     TaskStats,
+    TaskStatus,
     TaskSummary,
     decode_cursor,
     encode_cursor,
@@ -173,13 +174,17 @@ class TaskRepository:
             row, _ = await self._locked(session, task_id)
             return await self._detail(session, row)
 
-    async def list(self, limit: int = 10, cursor: str | None = None) -> TaskList:
+    async def list(
+        self, limit: int = 10, cursor: str | None = None, status: TaskStatus | None = None,
+    ) -> TaskList:
         if not 1 <= limit <= 50:
             raise TaskError(422, "每页对话数量必须为 1 到 50")
         boundary = decode_cursor(cursor) if cursor is not None else None
         await self.recover_expired()
         async with self._transaction() as session:
             statement = select(TaskRow).order_by(TaskRow.updated_at.desc(), TaskRow.id.desc()).limit(limit + 1)
+            if status is not None:
+                statement = statement.where(TaskRow.status == status)
             if boundary is not None:
                 statement = statement.where(tuple_(TaskRow.updated_at, TaskRow.id) < boundary)
             rows = (await session.scalars(statement)).all()

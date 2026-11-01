@@ -6,6 +6,6 @@
 </template>
 
 <style scoped>
-.brand-mark { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 16px; font-weight: 600; white-space: nowrap; }
-img { flex: none; width: 28px; height: 28px; object-fit: contain; border-radius: 8px; }
+.brand-mark { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; font-weight: 500; letter-spacing: .01em; white-space: nowrap; }
+img { flex: none; width: 28px; height: 28px; object-fit: contain; }
 </style>

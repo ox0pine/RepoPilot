@@ -4,6 +4,7 @@ import { NButton } from 'naive-ui'
 import { ApiError } from '../api/client'
 import { cancelRun, createDelivery, createRun, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
 import { sessionToken, sessionVersion } from '../stores/session'
+import { formatDateTime } from '../lib/time'
 
 const props = defineProps<{ taskId: string; revision: number; goalVersion: number; approved: boolean }>()
 const emit = defineEmits<{ changed: []; active: [value: boolean] }>()
@@ -25,6 +26,7 @@ const activeStatus = (status: RunStatus) => status === 'queued' || status === 'r
 const activeRun = computed(() => runs.value.find(run => activeStatus(run.status)))
 const guarded = computed(() => !known.value || !!activeRun.value || uncertain.value || !!readError.value || !!busy.value)
 const labels: Record<RunStatus, string> = { queued: '排队中', running: '执行中', completed: '检查通过，待审阅', failed: '执行失败', blocked: '需要处理', exhausted: '已达执行上限', cancelled: '已取消', interrupted: '执行中断' }
+const tones: Record<RunStatus, string> = { queued: 'accent', running: 'accent', completed: 'success', failed: 'danger', blocked: 'warning', exhausted: 'warning', cancelled: 'muted', interrupted: 'warning' }
 const canStart = computed(() => props.approved && !guarded.value)
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -43,8 +45,82 @@ const environmentProjects = computed(() => {
   const projects = environment.value?.projects
   return Array.isArray(projects) ? projects.filter(isRecord) : []
 })
+const passedChecks = computed(() => detail.value?.checks.filter(entry => entry.exit_code === 0).length ?? 0)
+
+interface DiffLine { kind: 'add' | 'del' | 'ctx' | 'meta'; text: string; oldNo: number | null; newNo: number | null }
+interface DiffHunk { header: string; lines: DiffLine[] }
+interface DiffFile { path: string; meta: string; hunks: DiffHunk[]; add: number; del: number }
+
+// Unified-diff reader: it only re-shapes the patch the worker already produced.
+function parsePatch(patch: string): DiffFile[] {
+  const files: DiffFile[] = []
+  let file: DiffFile | null = null
+  let hunk: DiffHunk | null = null
+  let oldNo = 0
+  let newNo = 0
+  const start = (path: string): DiffFile => {
+    const item: DiffFile = { path, meta: '', hunks: [], add: 0, del: 0 }
+    files.push(item)
+    hunk = null
+    return item
+  }
+  for (const raw of patch.split('\n')) {
+    if (raw.startsWith('diff --git ')) {
+      const match = /^diff --git a\/(.+) b\/(.+)$/.exec(raw)
+      file = start(match ? match[2]! : raw.slice(11))
+      continue
+    }
+    if (raw.startsWith('--- ')) {
+      const path = raw.slice(4).trim().replace(/^[ab]\//, '')
+      if (path === '/dev/null') continue
+      if (!file || file.hunks.length || file.path !== path) file = start(path)
+      continue
+    }
+    if (raw.startsWith('+++ ')) {
+      if (!file) {
+        const path = raw.slice(4).trim().replace(/^[ab]\//, '')
+        if (path !== '/dev/null') file = start(path)
+      }
+      continue
+    }
+    if (!file) continue
+    if (raw.startsWith('@@')) {
+      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw)
+      oldNo = match ? Number(match[1]) : 0
+      newNo = match ? Number(match[2]) : 0
+      hunk = { header: raw, lines: [] }
+      file.hunks.push(hunk)
+      continue
+    }
+    if (!hunk) {
+      // `index` lines carry blob hashes nobody reviews; keep mode and rename notes only.
+      const meta = raw.trim()
+      if (meta && !meta.startsWith('index ')) file.meta = file.meta ? `${file.meta} · ${meta}` : meta
+      continue
+    }
+    if (raw.startsWith('\\')) {
+      hunk.lines.push({ kind: 'meta', text: raw, oldNo: null, newNo: null })
+    } else if (raw.startsWith('+')) {
+      file.add += 1
+      hunk.lines.push({ kind: 'add', text: raw.slice(1), oldNo: null, newNo: newNo++ })
+    } else if (raw.startsWith('-')) {
+      file.del += 1
+      hunk.lines.push({ kind: 'del', text: raw.slice(1), oldNo: oldNo++, newNo: null })
+    } else if (raw.startsWith(' ')) {
+      hunk.lines.push({ kind: 'ctx', text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ })
+    }
+  }
+  return files
+}
+const diffFiles = computed(() => parsePatch(detail.value?.patch ?? ''))
+const diffStats = computed(() => diffFiles.value.reduce((total, file) => ({ add: total.add + file.add, del: total.del + file.del }), { add: 0, del: 0 }))
+function checkTone(exitCode: number | null): string {
+  return exitCode === null ? 'muted' : exitCode === 0 ? 'success' : 'danger'
+}
+function checkLabel(exitCode: number | null): string {
+  return exitCode === null ? '未完成' : exitCode === 0 ? '通过' : `退出码 ${exitCode}`
+}
 function message(error: unknown): string { return error instanceof Error ? error.message : '请求失败' }
-function date(value: string): string { return new Date(value).toLocaleString('zh-CN') }
 function stop(): void { if (timer !== undefined) clearTimeout(timer); timer = undefined }
 function reset(): void {
   epoch++; sequence++; detailSequence++; stop()
@@ -190,9 +266,9 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
     <header class="panel-header">
       <h2 id="run-heading">执行</h2>
       <div class="panel-actions">
-        <NButton v-if="detail && activeStatus(detail.status)" :disabled="detail.cancel_requested || !!busy" :loading="busy === 'cancel'" @click="mutate('cancel')">取消执行</NButton>
-        <NButton v-else-if="approved && !activeRun" :type="runs.length ? 'default' : 'primary'" :disabled="!canStart" :loading="busy === 'start'" @click="mutate('start')">{{ runs.length ? '重新执行' : '开始执行' }}</NButton>
-        <NButton size="small" :disabled="!!busy" :loading="loading" @click="refresh">刷新</NButton>
+        <NButton v-if="detail && activeStatus(detail.status)" size="small" :disabled="detail.cancel_requested || !!busy" :loading="busy === 'cancel'" @click="mutate('cancel')">取消执行</NButton>
+        <NButton v-else-if="approved && !activeRun" size="small" :type="runs.length ? 'default' : 'primary'" :disabled="!canStart" :loading="busy === 'start'" @click="mutate('start')">{{ runs.length ? '重新执行' : '开始执行' }}</NButton>
+        <NButton size="small" quaternary :disabled="!!busy" :loading="loading" @click="refresh">刷新</NButton>
       </div>
     </header>
     <p class="panel-note">
@@ -206,15 +282,15 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
     <p v-if="known && !runs.length" class="empty-note">还没有执行记录。</p>
     <nav v-if="runs.length > 1" class="run-list" aria-label="执行记录">
       <button v-for="run in runs" :key="run.id" type="button" :aria-pressed="selectedId === run.id" @click="select(run.id)">
-        <strong>{{ run.cancel_requested && activeStatus(run.status) ? '正在停止' : labels[run.status] }}</strong>
-        <span>v{{ run.goal_version }} · {{ date(run.created_at) }}</span>
+        <span class="status" :data-tone="tones[run.status]">{{ run.cancel_requested && activeStatus(run.status) ? '正在停止' : labels[run.status] }}</span>
+        <span class="run-when"><span class="ident">v{{ run.goal_version }}</span>{{ formatDateTime(run.created_at) }}</span>
       </button>
     </nav>
 
     <article v-if="detail" class="run-detail" aria-label="选中执行的详情">
       <header class="detail-header">
         <h3>{{ detail.cancel_requested && activeStatus(detail.status) ? '正在停止' : labels[detail.status] }}</h3>
-        <span class="detail-meta">方案 v{{ detail.goal_version }} · {{ detail.started_at ? date(detail.started_at) : '尚未开始' }}</span>
+        <span class="detail-meta"><span class="ident">v{{ detail.goal_version }}</span>{{ detail.started_at ? formatDateTime(detail.started_at) : '尚未开始' }}</span>
       </header>
       <p v-if="activeStatus(detail.status)" class="panel-note">离开页面后任务仍会继续。取消后，请等待状态更新。</p>
       <p v-if="detail.error" class="notice is-warning" role="alert">{{ detail.error }}</p>
@@ -222,24 +298,44 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
       <section class="review-block" aria-labelledby="patch-title">
         <div class="block-header">
           <h4 id="patch-title">代码变更</h4>
-          <NButton size="small" :disabled="!detail.patch" @click="download('patch')">下载补丁</NButton>
+          <span v-if="diffFiles.length" class="diff-stats"><span class="add">+{{ diffStats.add }}</span><span class="del">−{{ diffStats.del }}</span></span>
+          <NButton size="small" quaternary :disabled="!detail.patch" @click="download('patch')">下载补丁</NButton>
         </div>
-        <pre class="patch">{{ detail.patch || '暂无可展示的代码变更，请结合执行报告查看原因。' }}</pre>
+        <div v-if="diffFiles.length" class="diff" tabindex="0" aria-label="代码变更补丁">
+          <section v-for="file in diffFiles" :key="file.path" class="diff-file">
+            <header class="diff-file-head">
+              <span class="diff-path">{{ file.path }}</span>
+              <span class="diff-stats"><span class="add">+{{ file.add }}</span><span class="del">−{{ file.del }}</span></span>
+            </header>
+            <p v-if="file.meta" class="diff-meta">{{ file.meta }}</p>
+            <section v-for="(hunk, hunkIndex) in file.hunks" :key="hunkIndex" class="diff-hunk">
+              <p class="diff-hunk-head">{{ hunk.header }}</p>
+              <div v-for="(line, lineIndex) in hunk.lines" :key="lineIndex" class="diff-line" :class="line.kind">
+                <span class="diff-gutter">
+                  <span class="diff-no">{{ line.oldNo ?? '' }}</span>
+                  <span class="diff-no">{{ line.newNo ?? '' }}</span>
+                  <span class="diff-no diff-no-compact">{{ line.newNo ?? line.oldNo ?? '' }}</span>
+                  <span class="diff-sign">{{ line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : line.kind === 'ctx' ? ' ' : '' }}</span>
+                </span>
+                <code class="diff-code">{{ line.text }}</code>
+              </div>
+            </section>
+          </section>
+        </div>
+        <p v-else class="muted">暂无可展示的代码变更，请结合执行报告查看原因。</p>
       </section>
 
       <section class="review-block" aria-labelledby="checks-title">
         <div class="block-header">
           <h4 id="checks-title">检查</h4>
-          <span class="block-meta">{{ detail.checks.length ? `${detail.checks.filter(entry => entry.exit_code === 0).length} / ${detail.checks.length} 通过` : '尚未开始' }}</span>
+          <span v-if="detail.checks.length" class="block-meta num">{{ passedChecks }} / {{ detail.checks.length }} 通过</span>
         </div>
         <p v-if="!detail.checks.length" class="muted">检查开始后，结果会显示在这里。</p>
         <details v-for="(entry, index) in detail.checks" :key="index" class="check-record" :open="entry.exit_code !== 0">
           <summary>
-            <span class="check-line">
-              <span class="check-state" :class="entry.exit_code === null ? 'pending' : entry.exit_code === 0 ? 'passed' : 'failed'">{{ entry.exit_code === null ? '未完成' : entry.exit_code === 0 ? '通过' : `未通过（退出码 ${entry.exit_code}）` }}</span>
-              <span class="check-phase">{{ entry.phase === 'setup' ? '环境准备' : entry.phase === 'baseline' ? '修改前检查' : '修改后检查' }}</span>
-            </span>
+            <span class="check-phase">{{ entry.phase === 'setup' ? '环境准备' : entry.phase === 'baseline' ? '修改前' : '修改后' }}</span>
             <code class="check-command">{{ entry.command }}</code>
+            <span class="status" :data-tone="checkTone(entry.exit_code)">{{ checkLabel(entry.exit_code) }}</span>
           </summary>
           <pre>{{ entry.output || '没有输出' }}</pre>
           <p v-if="entry.truncated" class="muted">内容较长，仅显示部分输出。</p>
@@ -274,7 +370,7 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
 
       <section class="review-block" aria-labelledby="report-title">
         <div class="block-header"><h4 id="report-title">执行报告</h4></div>
-        <pre>{{ detail.report || '执行结束后可查看报告。' }}</pre>
+        <div class="report-body">{{ detail.report || '执行结束后可查看报告。' }}</div>
       </section>
 
       <section class="delivery-block" aria-labelledby="delivery-title">
@@ -297,13 +393,13 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
         <summary>执行信息与日志</summary>
         <dl>
           <dt>执行编号</dt><dd><code>{{ detail.id }}</code></dd>
-          <dt>方案版本</dt><dd>v{{ detail.goal_version }}</dd>
+          <dt>方案版本</dt><dd><span class="ident">v{{ detail.goal_version }}</span></dd>
           <dt>运行镜像</dt><dd>{{ detail.image }} / {{ detail.image_id || '尚未准备' }}</dd>
-          <dt>开始 / 结束</dt><dd>{{ detail.started_at ? date(detail.started_at) : '尚未开始' }} / {{ detail.finished_at ? date(detail.finished_at) : '尚未结束' }}</dd>
+          <dt>开始 / 结束</dt><dd class="num">{{ detail.started_at ? formatDateTime(detail.started_at) : '尚未开始' }} / {{ detail.finished_at ? formatDateTime(detail.finished_at) : '尚未结束' }}</dd>
         </dl>
         <div class="raw-actions"><NButton size="small" @click="download('json')">下载执行记录</NButton></div>
         <h5>执行日志（{{ detail.events.length }} 条）</h5>
-        <ol class="events"><li v-for="event in detail.events" :key="event.id"><strong>#{{ event.id }} · {{ event.kind }}</strong> · {{ date(event.created_at) }}<span v-if="event.payload.call_id" class="run-id">调用编号：{{ event.payload.call_id }}</span><pre>{{ JSON.stringify(event.payload, null, 2) }}</pre></li></ol>
+        <ol class="events"><li v-for="event in detail.events" :key="event.id"><strong>#{{ event.id }} · {{ event.kind }}</strong> · {{ formatDateTime(event.created_at) }}<span v-if="event.payload.call_id" class="run-id">调用编号：{{ event.payload.call_id }}</span><pre>{{ JSON.stringify(event.payload, null, 2) }}</pre></li></ol>
       </details>
     </article>
   </section>
@@ -312,62 +408,93 @@ onBeforeUnmount(() => { reset(); emit('active', false) })
 <style scoped>
 .run-panel { min-width: 0; margin: 24px 0; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-h2 { margin: 0; font-size: 16px; }
+h2 { margin: 0; font-size: 15px; font-weight: 500; }
 .panel-actions { display: flex; align-items: center; gap: 8px; }
 .panel-note { margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
 .panel-note span { color: var(--text-muted); }
-.empty-note { margin: 14px 0 0; color: var(--text-muted); font-size: 13px; }
-.notice { padding: 12px; margin: 14px 0 0; border-radius: 8px; font-size: 13px; white-space: pre-wrap; }
+.empty-note { margin: 16px 0 0; color: var(--text-muted); font-size: 13px; }
+.notice { padding: 12px; margin: 16px 0 0; border-radius: 8px; font-size: 13px; white-space: pre-wrap; }
 .notice.is-warning { background: var(--warning-bg); color: var(--warning-text); }
-.run-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 14px 0 0; list-style: none; }
-.run-list button { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
-.run-list button strong { font-size: 13px; font-weight: 600; color: var(--text); }
-.run-list button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.run-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 16px 0 0; list-style: none; }
+.run-list button { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.run-list button:hover { background: var(--surface-hover); }
+.run-list button[aria-pressed="true"] { border-color: var(--text-muted); background: var(--surface-hover); }
+.run-when { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
 .run-list button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .run-detail { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
 .detail-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
-h3 { margin: 0; font-size: 15px; }
-.detail-meta { color: var(--text-muted); font-size: 12px; }
-.review-block { margin-top: 20px; }
-.block-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-h4 { margin: 0; font-size: 14px; }
+h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.detail-meta { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.review-block { margin-top: 24px; }
+.block-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.block-header > h4 { margin-right: 0; }
+.block-header > :last-child:not(:first-child) { margin-left: auto; }
+h4 { margin: 0; font-size: 13px; font-weight: 500; color: var(--text-secondary); letter-spacing: .01em; }
 .block-meta { color: var(--text-muted); font-size: 12px; }
-h5 { margin: 16px 0 6px; font-size: 13px; font-weight: 600; }
-pre { padding: 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 360px; overflow-y: auto; border-radius: 6px; background: var(--code-bg); font-size: 12px; line-height: 1.6; }
-.patch { max-height: 480px; }
-.muted { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
-.check-record { margin-bottom: 6px; border: 1px solid var(--border-soft); border-radius: 8px; }
-.check-record > summary { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; cursor: pointer; font-size: 12px; }
-.check-line { display: flex; align-items: center; gap: 8px; }
-.check-state { flex-shrink: 0; padding: 1px 7px; border-radius: 4px; font-weight: 600; }
-.check-state.passed { background: var(--success-bg); color: var(--success-text); }
-.check-state.failed { background: var(--danger-bg); color: var(--danger-text); }
-.check-state.pending { background: var(--surface-hover); color: var(--text-secondary); }
-.check-phase { flex-shrink: 0; color: var(--text-secondary); }
-.check-command { color: var(--text-muted); background: none; padding: 0; overflow-wrap: anywhere; }
-.check-record > pre { margin: 0 12px 12px; max-height: 240px; }
-.check-config { margin-top: 10px; border: 1px solid var(--border-soft); border-radius: 8px; }
-.check-config > summary, .run-raw > summary { padding: 10px 12px; cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+h5 { margin: 16px 0 8px; font-size: 13px; font-weight: 500; }
+
+/* The diff is the one place on the screen where color carries meaning. */
+.diff-stats { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.diff-stats .add { color: var(--success-text); }
+.diff-stats .del { color: var(--danger-text); }
+.diff { max-height: 640px; overflow: auto; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); font-size: 12px; line-height: 20px; }
+.diff:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.diff-file + .diff-file { border-top: 1px solid var(--border); }
+.diff-file-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface-hover); }
+.diff-file-head > :last-child { margin-left: auto; }
+.diff-path { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+.diff-meta { margin: 0; padding: 4px 12px; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; }
+.diff-hunk-head { margin: 0; padding: 4px 12px; border-top: 1px solid var(--border-soft); color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; white-space: pre; }
+.diff-line { display: grid; grid-template-columns: 88px minmax(0, 1fr); width: max-content; min-width: 100%; }
+.diff-gutter { display: grid; grid-template-columns: 32px 32px 24px; align-items: center; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.diff-no { padding-right: 8px; }
+.diff-no-compact { display: none; }
+.diff-sign { text-align: left; }
+.diff-code { padding: 0 12px 0 4px; font-family: var(--font-mono); font-size: 12px; line-height: 20px; white-space: pre; }
+.diff-line.add { background: var(--diff-add-bg); }
+.diff-line.add .diff-gutter { background: var(--diff-add-mark); color: var(--success-text); }
+.diff-line.del { background: var(--diff-del-bg); }
+.diff-line.del .diff-gutter { background: var(--diff-del-mark); color: var(--danger-text); }
+.diff-line.meta .diff-code { color: var(--text-muted); }
+
+.check-record { margin-bottom: 4px; border-bottom: 1px solid var(--border-soft); }
+.check-record > summary { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 8px 4px; cursor: pointer; font-size: 12px; }
+.check-record:last-of-type { border-bottom: 0; }
+.check-phase { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.check-command { color: var(--text-secondary); background: none; padding: 0; font-size: 12px; overflow-wrap: anywhere; }
+.check-record > pre { margin: 4px 0 12px 76px; max-height: 240px; }
+.check-config { margin-top: 12px; border: 1px solid var(--border-soft); border-radius: 8px; }
+.check-config > summary, .run-raw > summary { padding: 8px 12px; cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .check-config > h5, .check-config > p, .check-config > pre, .check-config > details, .check-config > section { margin-left: 12px; margin-right: 12px; }
-.check-config > h5:first-of-type { margin-top: 4px; }
+.check-config > h5:first-of-type { margin-top: 8px; }
 .environment-project { margin-top: 12px; }
-dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 10px 0 0; font-size: 12px; }
-dt { color: var(--text-muted); } dd { margin: 0; }
-.delivery-block { margin-top: 20px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 12px 0 0; font-size: 12px; }
+dt { color: var(--text-muted); } dd { margin: 0; overflow-wrap: anywhere; }
+dd code { font-size: 11px; color: var(--text-secondary); }
+.delivery-block { margin-top: 24px; padding: 16px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg); }
 .delivery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .delivery-actions .muted { flex: 1; min-width: 200px; margin: 0; }
-.run-raw { margin-top: 20px; border-top: 1px solid var(--border-soft); }
+.run-raw { margin-top: 24px; border-top: 1px solid var(--border-soft); }
 .run-raw > summary { padding: 12px 0; }
-.run-raw > h5, .run-raw > dl, .run-raw > ol, .run-raw > .raw-actions { margin-left: 0; margin-right: 0; }
 .raw-actions { margin-top: 12px; }
-.events { padding-left: 18px; margin: 0; font-size: 12px; }
+.events { padding-left: 16px; margin: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
 .events li { margin-bottom: 12px; }
 .run-id { display: block; margin-top: 4px; color: var(--text-muted); }
-@media (max-width: 600px) {
+.report-body { padding: 12px 16px; border-radius: 8px; background: var(--bg); font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+pre { padding: 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 360px; overflow-y: auto; border-radius: 8px; background: var(--surface-hover); font-size: 12px; line-height: 1.6; }
+.muted { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+@media (max-width: 640px) {
   .run-panel { padding: 16px; }
   .panel-header { align-items: flex-start; }
-  dl { grid-template-columns: minmax(0, 1fr); }
-  dd { margin-bottom: 6px; }
+  dl { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  dd { margin-bottom: 8px; }
+  .check-record > summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .check-phase { display: none; }
+  .check-record > pre { margin-left: 0; }
+  .diff-line { grid-template-columns: 40px minmax(0, 1fr); }
+  .diff-gutter { display: block; }
+  .diff-gutter > .diff-no:not(.diff-no-compact), .diff-sign { display: none; }
+  .diff-no-compact { display: block; }
   .delivery-actions > button { width: 100%; }
 }
 </style>

@@ -90,9 +90,10 @@ export interface TaskStats {
   generation_failed: number
 }
 
-export function listTasks(limit: number, cursor: string | null, signal: AbortSignal): Promise<TaskList> {
+export function listTasks(limit: number, cursor: string | null, signal: AbortSignal, status: TaskStatus | null = null): Promise<TaskList> {
   const query = new URLSearchParams({ limit: String(limit) })
   if (cursor !== null) query.set('cursor', cursor)
+  if (status !== null) query.set('status', status)
   return request<TaskList>(`/api/tasks?${query}`, { signal })
 }
 

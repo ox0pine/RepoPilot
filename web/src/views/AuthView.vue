@@ -43,8 +43,8 @@ function submit(): void {
             @click="reveal = !reveal"
           >
             <template #icon>
-              <EyeOff v-if="reveal" :size="18" :stroke-width="1.75" aria-hidden="true" />
-              <Eye v-else :size="18" :stroke-width="1.75" aria-hidden="true" />
+              <EyeOff v-if="reveal" :size="16" :stroke-width="1.5" aria-hidden="true" />
+              <Eye v-else :size="16" :stroke-width="1.5" aria-hidden="true" />
             </template>
           </NButton>
         </div>
@@ -54,7 +54,7 @@ function submit(): void {
         </NButton>
       </form>
       <p id="session-note" class="session-note">
-        <KeyRound :size="18" :stroke-width="1.75" aria-hidden="true" />
+        <KeyRound :size="16" :stroke-width="1.5" aria-hidden="true" />
         <span>访问密钥仅在本次登录期间保留，刷新页面后需要重新登录。</span>
       </p>
     </main>
@@ -64,20 +64,20 @@ function submit(): void {
 <style scoped>
 .auth-page { display: flex; flex-direction: column; justify-content: center; min-height: 100dvh; padding: 48px 24px; }
 .auth-layout { width: 100%; max-width: 400px; margin: 0 auto; }
-.auth-brand { margin-bottom: 36px; }
-h1 { margin: 0 0 12px; font-size: 28px; line-height: 1.35; }
-.intro-description { margin: 0 0 28px; color: var(--text-secondary); font-size: 15px; line-height: 1.7; }
+.auth-brand { margin-bottom: 32px; }
+h1 { margin: 0 0 8px; font-size: 26px; font-weight: 500; line-height: 1.3; }
+.intro-description { margin: 0 0 24px; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
 .auth-form { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.token-label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
-.token-field { display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: center; gap: 8px; }
-.reveal-button { width: 44px; min-height: 44px; }
+.token-label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 500; }
+.token-field { display: grid; grid-template-columns: minmax(0, 1fr) 40px; align-items: center; gap: 8px; }
+.reveal-button { width: 40px; min-height: 40px; }
 .auth-error { margin-top: 12px; }
-.submit-button { width: 100%; min-height: 42px; margin-top: 16px; }
+.submit-button { width: 100%; min-height: 40px; margin-top: 16px; }
 .session-note { display: flex; align-items: flex-start; gap: 8px; margin: 20px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
-.session-note svg { flex-shrink: 0; margin-top: 1px; }
+.session-note svg { flex-shrink: 0; margin-top: 2px; }
 @media (max-width: 768px) {
   .auth-page { padding: 32px 16px; }
-  .auth-brand { margin-bottom: 28px; }
-  h1 { font-size: 24px; }
+  .auth-brand { margin-bottom: 24px; }
+  h1 { font-size: 22px; }
 }
 </style>

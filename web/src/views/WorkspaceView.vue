@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
-import SettingsDialog from '../components/SettingsDialog.vue'
 import TaskListView from './TaskListView.vue'
 import NewTaskView from './NewTaskView.vue'
 import TaskDetailView from './TaskDetailView.vue'
 import { route } from '../router'
 import { refreshTasks } from '../stores/tasks'
 
+// The settings dialog pulls in two credential forms; load it when it is opened.
+const SettingsDialog = defineAsyncComponent(() => import('../components/SettingsDialog.vue'))
+
 const emit = defineEmits<{ logout: [] }>()
 const settingsOpen = ref(false)
 const taskId = computed(() => route.value.startsWith('/app/tasks/') ? route.value.slice('/app/tasks/'.length).toLowerCase() : null)
-onMounted(() => { void refreshTasks() })
 </script>
 
 <template>
@@ -28,9 +29,10 @@ onMounted(() => { void refreshTasks() })
 
 <style scoped>
 .workspace-layout { display: flex; min-height: 100dvh; background: var(--bg); }
-.workspace-main { box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 36px clamp(20px, 4vw, 40px) 64px; }
+/* One gutter and one column width for every workspace screen. */
+.workspace-main { box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: var(--page-gutter) var(--page-gutter) 64px; }
 @media (max-width: 768px) {
   .workspace-layout { flex-direction: column; }
-  .workspace-main { padding: 32px 16px; }
+  .workspace-main { padding: 24px 16px 48px; }
 }
 </style>

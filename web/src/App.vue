@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { NConfigProvider, zhCN, dateZhCN } from 'naive-ui'
-import { themeOverrides } from './styles/theme'
+import { NConfigProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui'
+import { colorScheme, themeForScheme } from './styles/scheme'
 import AuthView from './views/AuthView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
 import { authenticate } from './api/auth'
@@ -50,7 +50,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncRoute))
 </script>
 
 <template>
-  <NConfigProvider :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
+  <NConfigProvider :theme="colorScheme === 'dark' ? darkTheme : null" :theme-overrides="themeForScheme" :locale="zhCN" :date-locale="dateZhCN">
   <a class="skip-link" href="#main">跳到主要内容</a>
   <WorkspaceView v-if="sessionToken && route !== '/auth'" @logout="logout" />
   <AuthView v-else :error="authError" :loading="authLoading" @authenticated="login" />

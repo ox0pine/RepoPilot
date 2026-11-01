@@ -133,6 +133,31 @@ async def test_statistics_and_stable_keyset_pagination(database):
     assert missing.value.status_code == 404
 
 
+async def test_list_filters_by_status(database):
+    repo = TaskRepository(database)
+    tasks = [await repo.create(source(i + 1)) for i in range(5)]
+    awaiting = await ready(repo, tasks[0])
+    generation = await repo.start_generation(tasks[1].id, 1, 'generate')
+    await repo.fail_generation(tasks[1].id, generation.generation_id, '安全错误')
+    approved = await ready(repo, tasks[2])
+    await repo.approve(approved.id, approved.revision, 1)
+
+    approved_page = await repo.list(10, status='approved')
+    assert [item.id for item in approved_page.items] == [tasks[2].id]
+    failed_page = await repo.list(10, status='generation_failed')
+    assert [item.id for item in failed_page.items] == [tasks[1].id]
+    assert [item.id for item in (await repo.list(10, status='awaiting_approval')).items] == [awaiting.id]
+    assert {item.id for item in (await repo.list(10, status='draft')).items} == {tasks[3].id, tasks[4].id}
+
+    # The filter narrows before the keyset boundary, so paging stays consistent.
+    first = await repo.list(1, status='draft')
+    assert first.next_cursor is not None
+    second = await repo.list(1, first.next_cursor, status='draft')
+    assert {first.items[0].id, second.items[0].id} == {tasks[3].id, tasks[4].id}
+    assert second.next_cursor is None
+    assert len((await repo.list(10)).items) == 5
+
+
 @pytest.mark.parametrize('field,value', [
     ('repository_url', 'git@github.com:example/repo.git'),
     ('repository_url', 'https://other.example/example/repo'),
@@ -217,6 +242,17 @@ async def api_client(database, monkeypatch):
     app = app_module.create_app(runtime)
     async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test', headers={'Authorization':'Bearer workbench-test'}) as client:
         yield client, calls, controls
+
+
+async def test_api_list_filters_by_status(api_client):
+    client, _, _ = api_client
+    payload = {'repository_url':'https://github.com/example/repo','baseline_commit':'a' * 40,'issue_url':'https://github.com/example/repo/issues/1'}
+    created = (await client.post('/api/tasks', json=payload)).json()
+    draft = await client.get('/api/tasks', params={'status':'draft'})
+    assert draft.status_code == 200 and [item['id'] for item in draft.json()['items']] == [created['id']]
+    assert (await client.get('/api/tasks', params={'status':'approved'})).json()['items'] == []
+    invalid = await client.get('/api/tasks', params={'status':'not-a-status'})
+    assert invalid.status_code == 422
 
 
 async def test_authenticated_api_goal_lifecycle(api_client):

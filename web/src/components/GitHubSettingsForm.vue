@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
-import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, NTag, type InputInst } from 'naive-ui'
+import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, type InputInst } from 'naive-ui'
 import { Copy } from '@lucide/vue'
 import { ApiError } from '../api/client'
 import { authorizeGitHubSettings, getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
       <section class="settings-card" aria-labelledby="repository-access-title">
         <div class="card-heading">
           <div><h3 id="repository-access-title">访问凭据</h3><p class="help">Token 用于访问 GitHub API、读取来源信息和推送修复分支。</p></div>
-          <NTag :bordered="false" :type="saved.api_token_configured ? 'success' : 'default'">{{ saved.api_token_configured ? 'Token 已保存' : '未配置' }}</NTag>
+          <span v-if="saved.api_token_configured" class="status" data-tone="success">已保存</span><span v-else class="status">未配置</span>
         </div>
 
         <div v-if="saved.api_token_configured && !tokenEditing" class="credential-summary">
@@ -224,7 +224,7 @@ onBeforeUnmount(() => {
             <template v-if="saved.public_key">
               <p class="key-label">SSH 公钥</p>
               <pre class="public-key" tabindex="0" aria-label="SSH 公钥">{{ saved.public_key }}</pre>
-              <NButton :disabled="busy || loading" @click="copyPublicKey"><template #icon><Copy :size="16" aria-hidden="true" /></template>复制公钥</NButton>
+              <NButton :disabled="busy || loading" @click="copyPublicKey"><template #icon><Copy :size="16" :stroke-width="1.5" aria-hidden="true" /></template>复制公钥</NButton>
               <p v-if="copyNotice" class="help" role="status">{{ copyNotice }}</p>
             </template>
             <p class="help">通过此处注册，需要 Fine-grained token 的 Account permissions → <strong>Git SSH keys: Read and write</strong>；Classic token 需要 <strong>read:public_key</strong> 和 <strong>write:public_key</strong>。</p>
@@ -241,20 +241,19 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .github-settings { min-width: 0; }
-h3 { margin: 0; }
-h3 { font-size: 15px; }
-h4 { margin: 0 0 8px; font-size: 13px; }
+h3 { margin: 0; font-size: 15px; font-weight: 500; }
+h4 { margin: 0 0 8px; font-size: 13px; font-weight: 500; }
 .description { margin: 0 0 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .settings-card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-.card-heading :deep(.n-tag) { flex-shrink: 0; }
+.card-heading > .status { flex-shrink: 0; margin-top: 2px; }
 .help { color: var(--text-secondary); font-size: 13px; margin: 8px 0; line-height: 1.7; overflow-wrap: anywhere; }
-.credential-summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px; background: var(--bg); border-radius: 8px; }
+.credential-summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 16px; background: var(--bg); border-radius: 8px; }
 .credential-summary :deep(.n-button) { flex-shrink: 0; }
 .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 .permission-guide { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
 .permission-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
-.permission-list > span { padding: 6px 10px; border: 1px solid var(--border-soft); border-radius: 6px; font-size: 12px; }
+.permission-list > span { padding: 4px 8px; border: 1px solid var(--border-soft); border-radius: 6px; font-size: 12px; }
 .permission-list strong { margin-left: 8px; color: var(--text-muted); font-weight: 400; }
 .classic-guide { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
 .classic-guide summary { cursor: pointer; }
@@ -262,8 +261,8 @@ h4 { margin: 0 0 8px; font-size: 13px; }
 .privacy-note { margin-top: 16px; }
 .advanced-settings { margin-top: 24px; }
 .advanced-card { border-color: var(--border-soft); }
-.key-label { margin: 20px 0 8px; font-weight: 600; font-size: 13px; }
-.public-key { margin: 0 0 12px; padding: 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.key-label { margin: 16px 0 8px; font-weight: 500; font-size: 13px; }
+.public-key { margin: 0 0 12px; padding: 12px; background: var(--surface-hover); border: 1px solid var(--border-soft); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .ssh-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 20px; }
 .feedback { margin-top: 16px; overflow-wrap: anywhere; }
 .loading-state { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; color: var(--text-secondary); }
