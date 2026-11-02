@@ -32,7 +32,6 @@ Run from the repository root. Prepare `.env` using `.env.example` and `docs/conf
 ```sh
 conda env create --file environment.yml  # first-time setup
 conda activate repopilot
-python -m pip install --no-deps --editable .
 docker compose up -d --wait postgres redis
 python -m repopilot                     # API
 ```
@@ -75,14 +74,14 @@ Tests require the dedicated-service configuration below; a passing command with 
 - `persistence/tasks.py`, `persistence/runs.py` under `src/repopilot/`: revision-controlled lifecycle, queue ownership, and result persistence. `persistence/database.py` bootstraps tables; do not assume an existing migration workflow.
 - `src/repopilot/execution/tools.py`, `execution/lsp/manager.py`: tool contracts and snapshot-validated semantic edits. `integration/delivery.py`: explicit repair-branch delivery and remote-conflict safeguards.
 - `web/src/App.vue`, `router/index.ts`, `stores/session.ts`, `stores/tasks.ts`: routing, authentication, shared state. `views/ConversationView.vue` and `components/RunPanel.vue`: approval/run polling and uncertain-write handling.
-- `pyproject.toml`, `environment.yml`, `requirements-dev.in`, `requirements-dev.txt`, `uv.lock`: Python packaging and dependency configuration. `web/package.json`, `web/package-lock.json`, `web/vite.config.ts`: frontend tooling.
+- `pyproject.toml`, `environment.yml`, `uv.lock`: Python packaging, the host Conda environment, and the locked dependency set used only by runtime images. `web/package.json`, `web/package-lock.json`, `web/vite.config.ts`: frontend tooling.
 - `compose.yaml`, `deploy/runtime.Dockerfile`: deployment topology and execution toolchain. Start with `docs/development/contributing.md` and `docs/development/architecture.md`; use `docs/reference/security.md` for isolation boundaries.
 
 ## Runtime/Tooling Preferences
 
-- Python `>=3.12`; preferred host development uses the `repopilot` Conda environment, not `.venv`. `environment.yml` pins Python 3.12.14 and installs hash-locked host dependencies.
+- Python `3.12`; host development uses the `repopilot` Conda environment from `environment.yml`, installed editable with the `dev` extra. Do not create a host `.venv`.
 - Frontend uses npm and its committed lockfile, with Node `^20.19.0 || >=22.12.0`; do not replace this with Bun. Use `npm ci` for reproducible installation.
-- Keep dependency declarations and their corresponding locks aligned. Host `requirements-dev.in`/`.txt`, application `pyproject.toml`/`uv.lock`, and sandbox tooling are separate dependency surfaces, not interchangeable environments.
+- `uv.lock` is generated for the API/Worker images only; those images install it with `uv sync --locked`. Run `uv lock` after changing dependency declarations, and keep it aligned with `pyproject.toml`. `environment.yml` needs no version pins beyond Python and pip because pip resolves from `pyproject.toml`.
 - Git, Docker Engine/Compose, PostgreSQL, and Redis are required for the complete workflow. The worker mounts the Docker socket: deploy only on a trusted host, and never expose control-plane credentials to task containers.
 
 ## Testing & QA

@@ -6,6 +6,14 @@
 
 ## 未发布
 
+### 依赖与配置收敛
+
+- 移除没有直接导入的运行时依赖声明：`openai-agents`、`mcp`、`jsonschema`、`pyyaml`、`alembic`、`docker` SDK、`tree-sitter`、`tree-sitter-python`、`anyio`。模型调用实际走 `httpx`，容器操作走 Docker CLI，`pyyaml` 与 `anyio` 仍由 `uvicorn[standard]`、`fastapi` 间接带入；`uv.lock` 由 74 个包降至 40 个。
+- 补上 `execution/environment.py` 实际导入但未声明的 `packaging`，避免只装运行时依赖的镜像在环境探测时报 `ImportError`；测试组补充 `bcrypt`，`tests/test_github_settings.py` 序列化 OpenSSH 加密私钥时依赖该模块。
+- 宿主环境与运行镜像分工收敛：`environment.yml` 只负责 Conda 与可编辑安装，运行时依赖和 `dev` 额外项统一从 `pyproject.toml` 解析；API/Worker 镜像继续用 `uv sync --locked` 安装 `uv.lock`。删除 `requirements-dev.in`、`requirements-dev.txt` 与 uv 管理的 `.venv`、`.python-version`。
+- `deploy/api.Dockerfile`、`deploy/worker.Dockerfile` 改为 `uv sync --locked --no-editable`，镜像按锁文件安装，不再由 pip 现场解析；宿主开发命令恢复为 `conda env create --file environment.yml` / `conda activate repopilot`。
+- 验证：`uv lock --check` 通过；`conda run -n repopilot ruff check src tests` 与改动前一致（112 项既有告警，未新增）；新建临时 Conda 环境并连接临时 PostgreSQL/Redis 运行后端测试，494 passed、54 skipped、1 failed，失败项 `test_patch_limit_never_returns_truncated_applicable_patch` 为 macOS 上已记录的 `os.killpg` EPERM 问题，与本次依赖变更无关；`deploy/api.Dockerfile` 与 `worker.Dockerfile` 构建成功并在锁文件下安装。
+
 ### 截图复核后的三处修正
 
 - 批准吸底栏改用 `--surface-hover` 并加 `--shadow-bar` 投影：与白卡片同色时，滚动中的方案文字看起来像被截断而不是被浮层盖住。

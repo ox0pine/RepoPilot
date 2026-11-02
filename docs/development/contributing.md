@@ -6,15 +6,16 @@
 
 先按[环境变量说明](../configuration/environment.md)创建 `.env` 并设置宿主数据库、Redis 连接和访问密钥。以下命令在仓库根目录执行。
 
-要求 Python `>=3.12`、Conda、Git、Docker，以及 Node `^20.19.0 || >=22.12.0`。宿主开发使用 `repopilot` Conda 环境，不使用 `.venv`；已有环境可跳过创建。
+要求 Python `3.12`、Conda、Git、Docker，以及 Node `^20.19.0 || >=22.12.0`。宿主开发使用 `repopilot` Conda 环境，不使用 `.venv`；`environment.yml` 以可编辑模式从 `pyproject.toml` 安装运行时依赖与 `dev` 额外项。`uv.lock` 仅供 API/Worker 镜像锁定安装。
 
 ```bash
 conda env create --file environment.yml
 conda activate repopilot
-python -m pip install --no-deps --editable .
 docker compose up -d --wait postgres redis
 python -m repopilot
 ```
+
+已有环境可跳过创建；依赖声明变化后执行 `conda env update --name repopilot --file environment.yml` 同步。
 
 另开终端启动前端：
 
@@ -23,7 +24,7 @@ npm --prefix web ci
 npm --prefix web run dev
 ```
 
-需要执行任务时，先构建运行镜像，再在另一个已激活 Conda 环境的终端启动 Worker：
+需要执行任务时，先构建运行镜像，再在另一个已激活 `repopilot` 环境的终端启动 Worker：
 
 ```bash
 docker build -f deploy/runtime.Dockerfile -t repopilot-dev:local .

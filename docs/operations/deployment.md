@@ -8,7 +8,7 @@
 - 可访问镜像源、Python/Node 依赖源、GitHub 和模型服务的网络。
 - 可信宿主机：Worker 需要挂载 Docker socket，具有高权限。
 
-以下命令均在仓库根目录运行。Docker 部署不要求宿主安装 Conda 或 Node。
+以下命令均在仓库根目录运行。Docker 部署只要求 Docker Engine/Compose，不要求宿主安装 Python 环境或 Node。
 
 ## 配置与启动
 
