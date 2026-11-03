@@ -4,13 +4,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
-ENV_IGNORES = {'.git', '.venv', 'node_modules', '__pycache__', 'dist', 'build', 'vendor', '.yarn', '.pnpm-store'}
+# IGNORED_DIRECTORIES is injected by container_helper.execute() inside the run
+# container, where python3 -I -S cannot import the host package.
+if 'IGNORED_DIRECTORIES' not in globals():  # control-plane import for discovery tests
+    from repopilot.repo_policy import IGNORED_DIRECTORIES
+
 PACKAGE_MANAGERS = {'npm': '10.9.2', 'pnpm': '9.15.9', 'yarn': '1.22.22'}
 MAX_PROJECTS = 16
 ENV_ACTIONS: list[dict] = []
@@ -21,7 +26,7 @@ def discover_projects(root: Path) -> list[dict]:
     visited = 0
     for directory, dirs, files in os.walk(root, followlinks=False):
         current = Path(directory)
-        dirs[:] = sorted(d for d in dirs if d not in ENV_IGNORES and not (current / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRECTORIES and not (current / d).is_symlink())
         visited += len(files) + len(dirs)
         if visited > 20000:
             raise ValueError('Project discovery exceeds 20000 entries')
@@ -102,7 +107,12 @@ def _environment_command(argv: list[str], cwd: Path, network: bool) -> tuple[boo
         return proc.returncode == 0, output.decode(errors='replace')
     finally:
         if proc.poll() is None:
-            proc.kill()
+            # start_new_session put only /bin/sh in our process group; a plain
+            # kill() would leave the real command running.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         proc.wait()
         selector.close()
         proc.stdout.close()
@@ -208,7 +218,7 @@ def _test_files(root: Path) -> list[Path]:
     result = []
     count = 0
     for directory, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in ENV_IGNORES and not (Path(directory) / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRECTORIES and not (Path(directory) / d).is_symlink())
         count += len(dirs) + len(files)
         if count > 20000:
             raise ValueError('Test discovery exceeds 20000 entries')
@@ -466,7 +476,8 @@ def prepare_environments(root: Path, *, network: bool = False, verify: bool = Fa
                     requested = _manager_version(manager, engine_range, network and not verify)
                 manager_executable = _package_manager(manager, requested, node_bin, network and not verify)
                 project.update({'node_version': version, 'package_manager': f'{manager}@{requested}', 'package_manager_executable': manager_executable, 'lockfile': locks[0][0] if locks else None, 'install_root': owner['root']})
-                if not node_compatible(data.get('engines', {}).get(manager, '*'), requested):
+                # Not a leaf means data is owner_data, already checked above.
+                if leaf and not node_compatible(data.get('engines', {}).get(manager, '*'), requested):
                     raise ValueError('Workspace member manager engine conflicts with root version')
                 if leaf:
                     prepared_owner = next((p for p in projects if p['root'] == owner['root'] and p['language'] != 'python'), None)

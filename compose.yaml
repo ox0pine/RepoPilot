@@ -1,5 +1,12 @@
 name: repopilot
 
+x-app-environment: &app-environment
+  API_TOKEN: ${API_TOKEN:?Set API_TOKEN}
+  GITHUB_CREDENTIALS_KEY: ${GITHUB_CREDENTIALS_KEY:-}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repopilot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-repopilot}
+  REDIS_URL: redis://redis:6379/0
+  EXECUTION_IMAGE: ${EXECUTION_IMAGE:-repopilot-dev:local}
+
 services:
   postgres:
     image: postgres:16
@@ -35,13 +42,9 @@ services:
   api:
     build:
       context: .
-      dockerfile: deploy/api.Dockerfile
-    environment:
-      API_TOKEN: ${API_TOKEN:?Set API_TOKEN}
-      GITHUB_CREDENTIALS_KEY: ${GITHUB_CREDENTIALS_KEY:-}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repopilot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-repopilot}
-      REDIS_URL: redis://redis:6379/0
-      EXECUTION_IMAGE: ${EXECUTION_IMAGE:-repopilot-dev:local}
+      dockerfile: deploy/service.Dockerfile
+      target: api
+    environment: *app-environment
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
@@ -68,14 +71,9 @@ services:
   worker:
     build:
       context: .
-      dockerfile: deploy/worker.Dockerfile
-    command: ["python", "-m", "repopilot.worker"]
-    environment:
-      API_TOKEN: ${API_TOKEN:?Set API_TOKEN}
-      GITHUB_CREDENTIALS_KEY: ${GITHUB_CREDENTIALS_KEY:-}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repopilot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-repopilot}
-      REDIS_URL: redis://redis:6379/0
-      EXECUTION_IMAGE: ${EXECUTION_IMAGE:-repopilot-dev:local}
+      dockerfile: deploy/service.Dockerfile
+      target: worker
+    environment: *app-environment
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

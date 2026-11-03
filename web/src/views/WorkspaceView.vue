@@ -20,7 +20,7 @@ const taskId = computed(() => route.value.startsWith('/app/tasks/') ? route.valu
     <WorkspaceSidebar @settings="settingsOpen = true" @logout="emit('logout')" />
     <main id="main" class="workspace-main" tabindex="-1">
       <NewTaskView v-if="route === '/app/new'" @settings="settingsOpen = true" @changed="refreshTasks" />
-      <TaskDetailView v-else-if="taskId" :key="taskId" :task-id="taskId" @settings="settingsOpen = true" @changed="refreshTasks" />
+      <TaskDetailView v-else-if="taskId" :key="taskId" :task-id="taskId" @settings="settingsOpen = true" />
       <TaskListView v-else />
     </main>
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />

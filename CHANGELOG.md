@@ -6,6 +6,28 @@
 
 ## 未发布
 
+### 冗余实现与死字段删除
+
+同一事实此前在多处各存一份，其中 6 处已经互相漂移。本轮每类事实只保留一个定义点：
+
+- 上限常量统一到 `domain/limits.py`：此前引擎按 255、持久层按 256 计数，现在两边都用 255，`append_event` 与引擎预算不再各自预留终态名额。`RunDetail.events` 改为取最新 255 条，因此写满日志时终态事件不会成为被丢弃的那条。
+- 脱敏统一到 `domain/secrets.py`：删除引擎与持久层各自的实现，保留 dict 键脱敏与“长密钥优先”排序。
+- GitHub 请求头与客户端构造统一到 `integration/github_http.py`（固定 `api.github.com`、`follow_redirects=False`、`trust_env=False`），四份头字典与四次构造调用合并；各模块的状态码→异常映射保留，因为操作语义不同。
+- 忽略目录统一到 `repo_policy.IGNORED_DIRECTORIES`。容器侧程序的 `python3 -I -S` 无法 import 宿主包，因此 `container_helper.py` 保留一份完全相同的字面量，并由 `container_helper` 注入给 `environment.py`，容器侧只剩一个定义点。后果是 `vendor/`、`.next/`、`.nuxt/`、`.pytest_cache/` 等目录不再出现在 Patch 中。
+- revision 守卫与活跃 Run 查询统一到 `persistence/runs.py` 的 `expect_revision`、`active_run_id`；过期字段表统一为 `persistence/tasks.py` 的 `_expire_values`。
+- 模型 API Key 的“沿用已保存值”规则统一到 `domain.settings.resolve_api_key`，缓存键与落库值不再可能分叉。
+- 路径校验统一到 `execution/paths.py`，`./calc.py` 与 `calc.py` 归一化为同一身份；容器侧的 sha256 比较是唯一权威校验，宿主删除第二份“先读后改”门闩。
+- 子进程执行统一到 `execution/process.py`：Git 克隆、补丁生成与交付三处的输出上限、超时、进程组清理共用一套算法。`os.killpg` 的 `EPERM` 视为“已无法从当前会话发送信号”，修复了 macOS 上长期存在的 `test_patch_limit_never_returns_truncated_applicable_patch` 失败。`environment.py` 的超时终止改为杀整个进程组，不再只杀 `/bin/sh`。
+- Git 可信环境统一为 `execution.git.base_git_environment`，补丁生成不再拼装第二份环境。
+- 前端错误分类统一到 `lib/errors.ts`，状态文案统一到 `lib/taskStatus.ts`，请求门闩统一到 `lib/liveRequest.ts`：任务列表与详情从此显示同一套状态文案（`待生成/生成中/待批准/已批准/生成失败`，列表页原先多出“方案”二字）。
+- 422 响应改为逐字段数组，前端据 `loc` 回填输入框。来源链接规则只保留在后端，前端删除 65 行重复校验与失焦即时提示；失焦提示是本次有意的取舍。
+- 任务详情不再因自身变更触发列表与统计的二次请求，改为按 revision 就地合并列表行。
+- 删除死字段与纯转发层：`app.state.database/redis`、`Workspace.image_id`、`GitAuthContext.strategy`、LSP `analysis_event`、`statsLoading/statsError`、`application/runs.py`（4/4 方法纯转发，路由直接使用 `RunRepository`）。
+- 部署单源化：`deploy/api.Dockerfile` 与 `deploy/worker.Dockerfile` 合并为 `deploy/service.Dockerfile` 的 `api`/`worker` target，基础镜像统一为 `python:3.12-slim-bookworm`；`compose.yaml` 用 `x-app-environment` 锚点消除 api 与 worker 的重复环境块。
+- 测试夹具单源化：新增 `tests/conftest.py`（隔离 schema、Docker 工作区工厂、API 客户端工厂）与 `tests/factories.py`（来源、Goal、已批准任务、已完成 Run），删除 5 处重复来源构造、3 处 Docker 夹具、2 处 API 客户端装配与 54 个冗余 `@pytest.mark.asyncio`（`asyncio_mode = "auto"` 已覆盖）。
+- `bcrypt` 测试依赖保留：仓库里确实没有 `import bcrypt`，但 `cryptography` 在序列化 OpenSSH 口令保护私钥时需要它——实测移除后 `test_encrypted_private_keys_are_rejected` 报 `UnsupportedAlgorithm: Need bcrypt module`，因此在 `pyproject.toml` 的 `dev` 组恢复并注明原因（运行镜像默认不装 `dev` 组，不受影响）。
+- 验证：`ruff check src tests` 从 112 项既有告警降至 98 项（无新增规则类别）；宿主 `pytest tests` 495 passed、55 skipped，`REPOPILOT_DOCKER_TESTS=1` 全量 550 passed、0 skipped（含新增 `test_dot_prefixed_read_allows_same_file_edit` 与“终态 `state` 事件恰好一条”断言）；`docker compose config -q`、`docker compose build api worker web`、`docker compose up -d --wait` 通过（`runtime` 正常 `Exited(0)`），`/api/health` 返回 `{"status":"ok"}`；`baseline_commit=abc` 的 `POST /api/tasks` 实测返回 `{"detail":[{"loc":["body","baseline_commit"],"msg":"请输入完整的 40 位十六进制 commit SHA"}]}`；浏览器实测该字段下显示后端中文错误且焦点落到该输入框，任务详情与列表状态文案一致，批准后仅出现批准/Run 请求、无额外列表与统计请求。
+
 ### 依赖与配置收敛
 
 - 移除没有直接导入的运行时依赖声明：`openai-agents`、`mcp`、`jsonschema`、`pyyaml`、`alembic`、`docker` SDK、`tree-sitter`、`tree-sitter-python`、`anyio`。模型调用实际走 `httpx`，容器操作走 Docker CLI，`pyyaml` 与 `anyio` 仍由 `uvicorn[standard]`、`fastapi` 间接带入；`uv.lock` 由 74 个包降至 40 个。

@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from repopilot.domain.settings import (
-    GitHubSettingsUpdate, InvalidGitHubSettingsError, ModelSettings, ensure_ssh_pair, validate_ssh_pair,
-    normalize_github_api_token,
+    GitHubSettingsUpdate, InvalidGitHubSettingsError, ModelSettings, ensure_ssh_pair, resolve_api_key,
+    validate_ssh_pair, normalize_github_api_token,
 )
 from repopilot.persistence.database import Database, GitHubSettingsRow, ModelSettingsRow
 
@@ -46,10 +46,10 @@ class SettingsRepository:
                     )
                     if row is None:
                         raise SettingsStorageError("Saved model settings are unavailable")
-                    if api_key is not None:
-                        token = api_key.strip()
-                    else:
-                        token = row.api_key if settings.base_url == row.base_url else ""
+                    token = resolve_api_key(
+                        base_url=settings.base_url, api_key=api_key,
+                        saved_base_url=row.base_url, saved_api_key=row.api_key,
+                    )
                     row.base_url = settings.base_url
                     row.model = settings.model
                     row.api_key = token

@@ -5,7 +5,7 @@
 ```text
 src/repopilot/
 ├── api/              # HTTP、鉴权与组合根
-├── application/      # 设置、Goal 与 Run 用例
+├── application/      # 设置与 Goal 用例
 ├── domain/           # 数据与协议契约
 ├── persistence/      # PostgreSQL 表、事务和存储
 ├── integration/      # GitHub、模型 HTTP 与 Redis 缓存

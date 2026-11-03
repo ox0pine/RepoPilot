@@ -24,6 +24,8 @@ dependencies = [
 repopilot = "repopilot.cli:main"
 
 [project.optional-dependencies]
+# bcrypt is an indirect test need: cryptography requires it to serialize
+# OpenSSH passphrase-protected keys (tests/test_github_settings.py).
 dev = ["pytest>=9.0.3,<10", "pytest-asyncio", "ruff", "bcrypt>=4,<6"]
 
 [tool.hatch.build.targets.wheel]

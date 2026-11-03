@@ -4,13 +4,16 @@ import { NButton, NInput, NSkeleton } from 'naive-ui'
 import { ArrowLeft, CheckCircle2, CircleAlert, Copy, LoaderCircle, MessageSquare } from '@lucide/vue'
 import GoalCard from '../components/GoalCard.vue'
 import RunPanel from '../components/RunPanel.vue'
-import { ApiError } from '../api/client'
-import { approveGoal, generateGoal, getTask, type GenerationAction, type TaskDetail, type TaskGoal, type TaskStatus } from '../api/tasks'
+import { approveGoal, generateGoal, getTask, type GenerationAction, type TaskDetail, type TaskGoal } from '../api/tasks'
 import { createRun } from '../api/runs'
-import { followLink } from '../router'
+import { followLink, isPlainClick } from '../router'
 import { sessionToken, sessionVersion } from '../stores/session'
-import { consumeAutoGenerate } from '../stores/tasks'
+import { consumeAutoGenerate, upsertTaskSummary } from '../stores/tasks'
 import { formatDateTime } from '../lib/time'
+import { isConflict, isUnknownOutcome, messageOf, needsConfiguration } from '../lib/errors'
+import { repositoryName } from '../lib/github'
+import { createRequestGate } from '../lib/liveRequest'
+import { TASK_STATUS_LABELS, TASK_STATUS_TONES } from '../lib/taskStatus'
 
 const props = defineProps<{ taskId: string }>()
 const emit = defineEmits<{ settings: []; changed: [] }>()
@@ -27,18 +30,11 @@ const feedbackOpen = ref(false)
 const feedbackInput = ref<InstanceType<typeof NInput> | null>(null)
 const timelineEnd = ref<HTMLElement | null>(null)
 const announcement = ref('')
-let epoch = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 let generationProbe: ReturnType<typeof setTimeout> | undefined
 let reading = false
 let readSequence = 0
-const controllers = new Set<AbortController>()
-const statuses: Record<TaskStatus, string> = {
-  draft: '待生成', generating: '生成中', awaiting_approval: '待批准', approved: '已批准', generation_failed: '生成失败',
-}
-const statusTones: Record<TaskStatus, string> = {
-  draft: 'muted', generating: 'accent', awaiting_approval: 'warning', approved: 'success', generation_failed: 'danger',
-}
+const gate = createRequestGate(() => props.taskId)
 const generating = computed(() => task.value?.status === 'generating' || (busy.value !== null && busy.value !== 'approve'))
 const canRevise = computed(() => !runActive.value && !!task.value?.current_goal_version && ['awaiting_approval', 'approved', 'generation_failed'].includes(task.value.status))
 const canSubmitFeedback = computed(() => canRevise.value && !busy.value && !generating.value && !!feedback.value.trim() && feedback.value.trim().length <= 8000)
@@ -80,7 +76,7 @@ function queueMeasure(): void {
   if (measureFrame === 0) measureFrame = requestAnimationFrame(measureSection)
 }
 function jumpToSection(event: MouseEvent, id: string): void {
-  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  if (isPlainClick(event)) return
   const element = document.getElementById(`section-${id}`)
   if (!element) return
   event.preventDefault()
@@ -88,29 +84,17 @@ function jumpToSection(event: MouseEvent, id: string): void {
   element.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' })
   activeSection.value = id
 }
-function repositoryName(url: string): string { return url.replace('https://github.com/', '') }
 function safeLink(value: string): string | undefined {
   return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/issues\/[1-9][0-9]*)?$/.test(value) ? value : undefined
 }
-function errorText(error: unknown): string { return error instanceof Error ? error.message : '请求失败，请重试' }
 function stopPolling(): void { if (timer !== undefined) clearTimeout(timer); timer = undefined }
 function resetRequests(): void {
-  epoch++
   readSequence++
   stopPolling()
   if (generationProbe !== undefined) clearTimeout(generationProbe)
   generationProbe = undefined
-  for (const controller of controllers) controller.abort()
-  controllers.clear()
+  gate.reset()
   reading = false
-}
-function requestContext() {
-  const controller = new AbortController()
-  controllers.add(controller)
-  const identity = epoch
-  const version = sessionVersion()
-  const id = props.taskId
-  return { controller, id, current: () => identity === epoch && version === sessionVersion() && id === props.taskId && !controller.signal.aborted }
 }
 function schedulePolling(): void {
   stopPolling()
@@ -123,17 +107,18 @@ async function mergeDetail(detail: TaskDetail): Promise<void> {
   const end = timelineEnd.value
   const nearBottom = !!end && end.getBoundingClientRect().bottom <= window.innerHeight + 120
   task.value = detail
+  upsertTaskSummary(detail)
   if (previous && detail.revision > previous.revision) {
     emit('changed')
-    if (previous.status === 'generating' && detail.status !== 'generating') announcement.value = `方案状态：${statuses[detail.status]}`
+    if (previous.status === 'generating' && detail.status !== 'generating') announcement.value = `方案状态：${TASK_STATUS_LABELS[detail.status]}`
   }
   schedulePolling()
   await nextTick()
   queueMeasure()
   if (addedMessages && nearBottom) {
-    const identity = epoch
+    const identity = gate.version()
     await nextTick()
-    if (identity === epoch) timelineEnd.value?.scrollIntoView({ block: 'end', behavior: 'auto' })
+    if (identity === gate.version()) timelineEnd.value?.scrollIntoView({ block: 'end', behavior: 'auto' })
   }
 }
 async function loadDetail(force = false): Promise<boolean> {
@@ -141,7 +126,7 @@ async function loadDetail(force = false): Promise<boolean> {
   const sequence = ++readSequence
   reading = true
   loading.value = !task.value
-  const context = requestContext()
+  const context = gate.open()
   const current = () => context.current() && sequence === readSequence
   try {
     const detail = await getTask(context.id, context.controller.signal)
@@ -151,12 +136,12 @@ async function loadDetail(force = false): Promise<boolean> {
     return true
   } catch (error) {
     if (current()) {
-      readError.value = errorText(error)
+      readError.value = messageOf(error)
       stopPolling()
     }
     return false
   } finally {
-    controllers.delete(context.controller)
+    gate.release(context.controller)
     if (current()) { reading = false; loading.value = false; schedulePolling() }
   }
 }
@@ -165,7 +150,7 @@ async function perform(action: GenerationAction | 'approve'): Promise<void> {
   if (action === 'revise' && !canSubmitFeedback.value) return
   const current = task.value
   const sentFeedback = feedback.value.trim()
-  const context = requestContext()
+  const context = gate.open()
   let approvalConfirmed = false
   busy.value = action
   actionError.value = ''
@@ -200,23 +185,23 @@ async function perform(action: GenerationAction | 'approve'): Promise<void> {
     announcement.value = action === 'approve' ? '方案已批准，执行已排队' : '方案已生成，请审阅后批准执行'
   } catch (error) {
     if (!context.current()) return
-    const conflict = error instanceof ApiError && error.status === 409
-    const unknown = !(error instanceof ApiError) || error.status >= 500 || error.status < 400
+    const conflict = isConflict(error)
+    const unknown = isUnknownOutcome(error)
     actionError.value = approvalConfirmed
       ? conflict
         ? '方案已批准，执行状态有更新。请先查看执行记录。'
         : unknown
           ? '方案已批准，暂时无法确认是否已开始执行。请先刷新执行记录，避免重复提交。'
-          : `方案已批准，执行未能开始：${errorText(error)}。处理后可重新开始。`
+          : `方案已批准，执行未能开始：${messageOf(error)}。处理后可重新开始。`
       : action === 'approve' && unknown
         ? '暂时无法确认批准结果，尚未提交执行。请刷新任务后再确认。'
-        : conflict ? '方案已更新，请重新审阅' : errorText(error)
-    needsSettings.value = error instanceof ApiError && error.status === 503
+        : conflict ? '方案已更新，请重新审阅' : messageOf(error)
+    needsSettings.value = needsConfiguration(error)
     announcement.value = actionError.value
     await loadDetail(true)
     if (context.current()) emit('changed')
   } finally {
-    controllers.delete(context.controller)
+    gate.release(context.controller)
     if (context.current()) {
       busy.value = null
       if (action === 'approve') runPanelVersion.value++
@@ -240,12 +225,12 @@ function feedbackKeydown(event: KeyboardEvent): void {
 }
 async function copyCommit(): Promise<void> {
   if (!task.value) return
-  const identity = epoch
+  const identity = gate.version()
   try {
     await navigator.clipboard.writeText(task.value.baseline_commit)
-    if (identity === epoch) announcement.value = '完整 commit SHA 已复制'
+    if (identity === gate.version()) announcement.value = '完整 commit SHA 已复制'
   } catch {
-    if (identity === epoch) announcement.value = '复制失败，请选择并复制完整 SHA'
+    if (identity === gate.version()) announcement.value = '复制失败，请选择并复制完整 SHA'
   }
 }
 async function executionChanged(): Promise<void> {
@@ -254,7 +239,7 @@ async function executionChanged(): Promise<void> {
 }
 watch(() => [props.taskId, sessionVersion()] as const, async () => {
   resetRequests()
-  const identity = epoch
+  const identity = gate.version()
   task.value = null
   runActive.value = false
   feedback.value = ''
@@ -266,7 +251,7 @@ watch(() => [props.taskId, sessionVersion()] as const, async () => {
   announcement.value = ''
   loading.value = false
   const autoGenerate = consumeAutoGenerate(props.taskId)
-  if (await loadDetail() && identity === epoch && autoGenerate && (task.value as TaskDetail | null)?.status === 'draft') void perform('generate')
+  if (await loadDetail() && identity === gate.version() && autoGenerate && (task.value as TaskDetail | null)?.status === 'draft') void perform('generate')
 }, { immediate: true, flush: 'sync' })
 onMounted(() => {
   window.addEventListener('scroll', queueMeasure, { passive: true })
@@ -299,7 +284,7 @@ onBeforeUnmount(() => {
             <span class="commit"><code :title="task.baseline_commit">{{ task.baseline_commit }}</code><NButton size="tiny" quaternary :focusable="true" aria-label="复制完整 commit SHA" @click="copyCommit"><Copy :size="16" :stroke-width="1.5" aria-hidden="true" /></NButton></span>
           </p>
         </div>
-        <span class="status" :data-tone="statusTones[task.status]" :class="{ 'is-live': generating }">{{ statuses[task.status] }}</span>
+        <span class="status" :data-tone="TASK_STATUS_TONES[task.status]" :class="{ 'is-live': generating }">{{ TASK_STATUS_LABELS[task.status] }}</span>
       </header>
 
       <nav v-if="sections.length > 1" class="section-nav" aria-label="页内导航">
@@ -368,8 +353,6 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .task { width: 100%; max-width: var(--content-width); color: var(--text); overflow-wrap: anywhere; }
-.back-link { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; color: var(--text-secondary); font-size: 13px; text-decoration: none; }
-.back-link:hover { color: var(--text); }
 .task-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin: 8px 0 24px; }
 .task-title-block { min-width: 0; }
 h1 { margin: 0 0 8px; font-size: 26px; font-weight: 500; line-height: 1.3; }

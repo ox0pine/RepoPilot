@@ -7,27 +7,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import text, update
-from test_tasks import api_client as api_client
-from test_tasks import database as database
-from test_tasks import goal, ready, source
+from factories import approved_task, make_goal, make_request, make_source, ready
 
 from repopilot.domain.runs import CreateRunRequest
 from repopilot.domain.tasks import TaskError
 from repopilot.persistence.database import TaskRow
 from repopilot.persistence.runs import RunRepository
 from repopilot.persistence.tasks import TaskRepository
-
-
-def request(task, **changes):
-    values = dict(expected_revision=task.revision, goal_version=task.current_goal_version)
-    values.update(changes)
-    return CreateRunRequest(**values)
-
-
-async def approved_task(database, number=1):
-    tasks = TaskRepository(database)
-    task = await ready(tasks, await tasks.create(source(number)))
-    return await tasks.approve(task.id, task.revision, task.current_goal_version)
 
 
 @pytest.mark.parametrize('changes', [
@@ -51,40 +37,40 @@ def test_run_request_contains_only_approval_versions():
 
 async def test_start_requires_latest_approved_goal_and_revision(database):
     tasks, runs = TaskRepository(database), RunRepository(database)
-    task = await tasks.create(source())
+    task = await tasks.create(make_source())
     with pytest.raises(TaskError) as missing_goal:
-        await runs.create(task.id, request(task, goal_version=1))
+        await runs.create(task.id, make_request(task, goal_version=1))
     assert missing_goal.value.status_code == 409
     task = await ready(tasks, task)
     with pytest.raises(TaskError) as unapproved:
-        await runs.create(task.id, request(task))
+        await runs.create(task.id, make_request(task))
     assert unapproved.value.status_code == 409
     task = await tasks.approve(task.id, task.revision, 1)
     with pytest.raises(TaskError) as stale:
-        await runs.create(task.id, request(task, expected_revision=task.revision - 1))
+        await runs.create(task.id, make_request(task, expected_revision=task.revision - 1))
     assert stale.value.status_code == 409
     with pytest.raises(TaskError) as mismatch:
-        await runs.create(task.id, request(task, goal_version=2))
+        await runs.create(task.id, make_request(task, goal_version=2))
     assert mismatch.value.status_code == 409
     assert await runs.list(task.id) == []
     attempt = await tasks.start_generation(task.id, task.revision, 'revise', 'Narrow the goal')
-    task = await tasks.complete_generation(task.id, attempt.generation_id, goal('Revised'), 'test-model')
+    task = await tasks.complete_generation(task.id, attempt.generation_id, make_goal(summary='Revised'), 'test-model')
     task = await tasks.approve(task.id, task.revision, 2)
     with pytest.raises(TaskError) as old_goal:
-        await runs.create(task.id, request(task, goal_version=1))
+        await runs.create(task.id, make_request(task, goal_version=1))
     assert old_goal.value.status_code == 409
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     assert run.goal_version == 2 and run.status == 'queued'
     with pytest.raises(TaskError) as missing_task:
-        await runs.create(uuid4(), request(task))
+        await runs.create(uuid4(), make_request(task))
     assert missing_task.value.status_code == 404
 
 
 async def test_concurrent_starts_enqueue_once_and_guard_goal_generation(database):
     tasks, runs = TaskRepository(database), RunRepository(database)
     task = await approved_task(database)
-    results = await asyncio.gather(runs.create(task.id, request(task)),
-                                   runs.create(task.id, request(task)), return_exceptions=True)
+    results = await asyncio.gather(runs.create(task.id, make_request(task)),
+                                   runs.create(task.id, make_request(task)), return_exceptions=True)
     accepted = [result for result in results if not isinstance(result, Exception)]
     rejected = [result for result in results if isinstance(result, TaskError)]
     assert len(accepted) == len(rejected) == 1
@@ -99,10 +85,10 @@ async def test_concurrent_starts_enqueue_once_and_guard_goal_generation(database
     assert unchanged.revision == current.revision and unchanged.approved_goal_version == 1
     assert unchanged.goals == current.goals
     other = await approved_task(database, 2)
-    assert (await runs.create(other.id, request(other))).status == 'queued'
+    assert (await runs.create(other.id, make_request(other))).status == 'queued'
     await runs.cancel(task.id, accepted[0].id)
     with pytest.raises(TaskError) as fresh_duplicate:
-        await runs.create(other.id, request(await tasks.detail(other.id)))
+        await runs.create(other.id, make_request(await tasks.detail(other.id)))
     assert fresh_duplicate.value.status_code == 409
     await tasks.start_generation(task.id, current.revision, 'revise', 'Different scope')
     resumed = await tasks.detail(task.id)
@@ -113,7 +99,7 @@ async def test_concurrent_starts_enqueue_once_and_guard_goal_generation(database
 async def test_queued_cancel_is_terminal_idempotent_and_task_scoped(database):
     tasks, runs = TaskRepository(database), RunRepository(database)
     task, other = await approved_task(database), await approved_task(database, 2)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     for operation in (runs.detail, runs.cancel):
         with pytest.raises(TaskError) as hidden:
             await operation(other.id, run.id)
@@ -128,7 +114,7 @@ async def test_queued_cancel_is_terminal_idempotent_and_task_scoped(database):
     assert repeated.model_dump() == cancelled.model_dump()
     assert (await runs.detail(task.id, run.id)).model_dump() == cancelled.model_dump()
     current = await tasks.detail(task.id)
-    next_run = await runs.create(task.id, request(current))
+    next_run = await runs.create(task.id, make_request(current))
     assert next_run.id != run.id and next_run.status == 'queued'
     assert [item.id for item in await runs.list(task.id)] == [next_run.id, run.id]
 
@@ -192,7 +178,7 @@ async def test_authenticated_run_api_and_secret_nonstorage(api_client, database)
 async def test_run_uses_system_image_and_empty_initial_commands(database):
     task = await approved_task(database)
     runs = RunRepository(database, default_image='system-image:configured')
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     assert run.image == 'system-image:configured'
     assert run.setup_command == run.check_command == ''
     claimed = await runs.claim()
@@ -202,7 +188,7 @@ async def test_run_uses_system_image_and_empty_initial_commands(database):
 async def test_execution_commands_are_fenced_and_frozen_after_resolution(database):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     assert not await runs.set_execution_commands(
         run.id, uuid4(), setup_command='stale setup', check_command='stale check',
     )
@@ -236,9 +222,9 @@ async def test_execution_commands_are_fenced_and_frozen_after_resolution(databas
 async def test_claim_fifo_skips_cancelled_and_invalid_approval(database, approval_change):
     tasks, runs = TaskRepository(database), RunRepository(database)
     first, second, third = [await approved_task(database, number) for number in (1, 2, 3)]
-    cancelled = await runs.create(first.id, request(first))
-    invalid = await runs.create(second.id, request(second))
-    valid = await runs.create(third.id, request(third))
+    cancelled = await runs.create(first.id, make_request(first))
+    invalid = await runs.create(second.id, make_request(second))
+    valid = await runs.create(third.id, make_request(third))
     await runs.cancel(first.id, cancelled.id)
     async with database.session() as session, session.begin():
         await session.execute(update(TaskRow).where(TaskRow.id == second.id).values(**approval_change))
@@ -261,7 +247,7 @@ async def test_claim_fifo_skips_cancelled_and_invalid_approval(database, approva
 async def test_running_cancel_requires_cleanup_and_wins_completion_race(database):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     stopping = await runs.cancel(task.id, run.id)
     assert stopping.status == 'running' and stopping.cancel_requested
@@ -282,7 +268,7 @@ async def test_running_cancel_requires_cleanup_and_wins_completion_race(database
 async def test_recovery_replaces_worker_token_and_requires_cleanup(database):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     old = await runs.claim()
     assert await runs.append_event(run.id, old.worker_token, 'assistant', {'text': 'Saved evidence'})
     recovered = await runs.recover(run.id)
@@ -307,7 +293,7 @@ async def test_execution_evidence_redacts_credentials_and_preserves_patch(databa
     from repopilot.persistence.runs import RunRow
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     secrets = ('provider-secret-marker', 'github-secret-marker')
     assert await runs.set_model(run.id, claimed.worker_token,
@@ -340,7 +326,7 @@ async def test_execution_evidence_redacts_credentials_and_preserves_patch(databa
 async def test_oversized_results_fail_without_publishing_partial_patch(database, field, limit):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     assert await runs.append_event(run.id, claimed.worker_token, 'assistant', {'text': 'Earlier evidence'})
     values = {'report': 'Report', 'patch': 'Complete small patch'}
@@ -354,15 +340,15 @@ async def test_oversized_results_fail_without_publishing_partial_patch(database,
     assert any(event.payload.get('text') == 'Earlier evidence' for event in ended.events)
 
 
-async def test_event_size_count_limits_reserve_terminal_and_keep_existing_logs(database):
+async def test_event_size_and_count_limits_keep_existing_logs(database):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     with pytest.raises(TaskError) as too_large:
         await runs.append_event(run.id, claimed.worker_token, 'assistant', {'text': '界' * (32 * 1024)})
     assert too_large.value.status_code == 409
-    # Fill the documented normal-event quota, including any lifecycle events already saved.
+    # Fill the documented event quota, including any lifecycle events already saved.
     existing = len((await runs.detail(task.id, run.id)).events)
     for index in range(255 - existing):
         assert await runs.append_event(run.id, claimed.worker_token, 'assistant', {'sequence': index})
@@ -371,8 +357,11 @@ async def test_event_size_count_limits_reserve_terminal_and_keep_existing_logs(d
     assert too_many.value.status_code == 409
     ended = await runs.finish(run.id, claimed.worker_token, status='exhausted',
                              error='Event limit reached', cleanup_confirmed=True)
-    assert ended.status == 'exhausted' and len(ended.events) == 256
+    assert ended.status == 'exhausted' and len(ended.events) == 255
+    # The terminal state is written once, by finish(), and is never the dropped event.
+    assert [event.kind for event in ended.events].count('state') == 1
     assert ended.events[-1].kind == 'state'
+    assert ended.events[-1].payload == {'status': 'exhausted'}
     assert [event.id for event in ended.events] == sorted({event.id for event in ended.events})
     assert not any(event.payload.get('text') == 'Not saved' for event in ended.events)
 
@@ -383,10 +372,10 @@ async def test_run_history_returns_latest_fifty_without_cross_task_records(datab
     history = []
     for _ in range(51):
         current = await tasks.detail(task.id)
-        run = await runs.create(task.id, request(current))
+        run = await runs.create(task.id, make_request(current))
         history.append(run.id)
         await runs.cancel(task.id, run.id)
-    other_run = await runs.create(other.id, request(other))
+    other_run = await runs.create(other.id, make_request(other))
     listed = await runs.list(task.id)
     assert [run.id for run in listed] == list(reversed(history[-50:]))
     assert other_run.id not in {run.id for run in listed}
@@ -400,11 +389,11 @@ async def test_claim_uses_immutable_source_and_goal_snapshots(database):
     from repopilot.persistence.database import TaskGoalRow
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     changed = task.source_snapshot.model_copy(update={'issue_body': 'Later issue text'})
     async with database.session() as session, session.begin():
         await session.execute(update(TaskRow).where(TaskRow.id == task.id).values(source_snapshot=changed.model_dump(mode='json')))
-        await session.execute(update(TaskGoalRow).where(TaskGoalRow.task_id == task.id, TaskGoalRow.version == 1).values(content=goal('Later goal text').model_dump(mode='json')))
+        await session.execute(update(TaskGoalRow).where(TaskGoalRow.task_id == task.id, TaskGoalRow.version == 1).values(content=make_goal(summary='Later goal text').model_dump(mode='json')))
     claimed = await runs.claim()
     assert claimed.id == run.id
     assert claimed.source_snapshot.issue_body == task.source_snapshot.issue_body
@@ -414,7 +403,7 @@ async def test_claim_uses_immutable_source_and_goal_snapshots(database):
 async def test_runtime_configuration_is_fixed_and_cleanup_failure_stays_running(database):
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     assert not await runs.cancellation_requested(run.id, claimed.worker_token)
     assert await runs.set_image_id(run.id, claimed.worker_token, 'sha256:fixed')
@@ -443,7 +432,7 @@ async def test_oversized_checks_fail_without_publishing_partial_results(database
     from repopilot.domain.runs import RunCheck
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     oversized = RunCheck(phase='final', command='python -m pytest', exit_code=0,
                          output='x' * (1024 * 1024 + 1), truncated=False)
@@ -459,7 +448,7 @@ async def test_live_check_evidence_survives_cancel_and_recovery(database):
 
     runs = RunRepository(database)
     task = await approved_task(database)
-    run = await runs.create(task.id, request(task))
+    run = await runs.create(task.id, make_request(task))
     claimed = await runs.claim()
     payload = _bounded_payload(dict(phase='baseline', command='python -m pytest',
                                    exit_code=1, output='失败\\n' * 20000, truncated=False))

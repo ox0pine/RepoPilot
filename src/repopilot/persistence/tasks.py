@@ -26,10 +26,17 @@ from repopilot.domain.tasks import (
     encode_cursor,
 )
 from repopilot.persistence.database import Database, TaskGoalRow, TaskMessageRow, TaskRow
-from repopilot.persistence.runs import RunRow
+from repopilot.persistence.runs import active_run_id, expect_revision
 
 
 INTERRUPTED_ERROR = "目标生成已中断，请重试"
+
+
+def _expire_values(now) -> dict:
+    return {
+        "status": "generation_failed", "last_error": INTERRUPTED_ERROR,
+        "generation_id": None, "generation_deadline": None, "updated_at": now,
+    }
 
 
 @dataclass(frozen=True)
@@ -103,12 +110,9 @@ class TaskRepository:
 
     @staticmethod
     def _fail_expired(row: TaskRow, now: datetime) -> None:
-        row.status = "generation_failed"
-        row.last_error = INTERRUPTED_ERROR
-        row.generation_id = None
-        row.generation_deadline = None
+        for field, value in _expire_values(now).items():
+            setattr(row, field, value)
         row.revision += 1
-        row.updated_at = now
 
     async def _locked(self, session: AsyncSession, task_id: UUID) -> tuple[TaskRow, datetime]:
         row = await session.scalar(select(TaskRow).where(TaskRow.id == task_id).with_for_update())
@@ -120,12 +124,7 @@ class TaskRepository:
             self._fail_expired(row, now)
         return row, now
 
-    @staticmethod
-    def _expect_revision(row: TaskRow, expected_revision: int) -> None:
-        if row.revision != expected_revision:
-            raise TaskError(409, "目标已更新，请重新确认")
-
-    async def recover_expired(self, task_id: UUID | None = None) -> int:
+    async def recover_expired(self, task_id: UUID | None = None) -> None:
         """Conditionally retire expired attempts using the database clock."""
         async with self._transaction() as session:
             statement = update(TaskRow).where(
@@ -134,15 +133,10 @@ class TaskRepository:
             )
             if task_id is not None:
                 statement = statement.where(TaskRow.id == task_id)
-            result = await session.execute(statement.values(
-                status="generation_failed",
-                last_error=INTERRUPTED_ERROR,
-                generation_id=None,
-                generation_deadline=None,
+            await session.execute(statement.values(
+                **_expire_values(func.clock_timestamp()),
                 revision=TaskRow.revision + 1,
-                updated_at=func.clock_timestamp(),
             ))
-            return result.rowcount
 
     async def create(self, source_snapshot: SourceSnapshot) -> TaskDetail:
         """Persist a verified immutable source and its initial source message."""
@@ -210,11 +204,8 @@ class TaskRepository:
         await self.recover_expired(task_id)
         async with self._transaction() as session:
             row, now = await self._locked(session, task_id)
-            self._expect_revision(row, expected_revision)
-            active_run = await session.scalar(select(RunRow.id).where(
-                RunRow.task_id == task_id, RunRow.status.in_(["queued", "running"]),
-            ))
-            if active_run is not None:
+            expect_revision(row, expected_revision)
+            if await active_run_id(session, task_id) is not None:
                 raise TaskError(409, "执行尚未结束，请先取消或等待完成后再修改目标")
             if action == "generate":
                 if row.status != "draft":
@@ -299,7 +290,7 @@ class TaskRepository:
             # Repeating the same approval is idempotent even with its original revision.
             if row.status == "approved" and row.approved_goal_version == goal_version == row.current_goal_version:
                 return await self._detail(session, row)
-            self._expect_revision(row, expected_revision)
+            expect_revision(row, expected_revision)
             if row.status != "awaiting_approval" or goal_version != row.current_goal_version or goal_version < 1:
                 raise TaskError(409, "只能批准最新的待批准目标")
             row.status = "approved"

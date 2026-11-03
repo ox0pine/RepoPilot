@@ -5,31 +5,22 @@ import { ListChecks, Plus } from '@lucide/vue'
 import { followLink } from '../router'
 import { loadMoreTasks, refreshTasks, setTaskFilter, taskStore } from '../stores/tasks'
 import { formatDateTime } from '../lib/time'
+import { repositoryName } from '../lib/github'
+import { TASK_STATUS_LABELS, TASK_STATUS_ORDER, TASK_STATUS_TONES } from '../lib/taskStatus'
 import type { TaskStats, TaskSummary } from '../api/tasks'
 
-const statusLabels: Record<TaskSummary['status'], string> = {
-  draft: '待生成方案', generating: '方案生成中', awaiting_approval: '待批准',
-  approved: '已批准', generation_failed: '生成失败',
-}
-const statusTones: Record<TaskSummary['status'], string> = {
-  draft: 'muted', generating: 'accent', awaiting_approval: 'warning',
-  approved: 'success', generation_failed: 'danger',
-}
 // Re-read on entry: task detail pages update the store, but the list can be stale after idle time.
 onMounted(() => { void refreshTasks() })
 const summary = computed(() => {
   const stats = taskStore.stats
   if (!stats) return ''
   const parts = [`${stats.total} 项任务`]
-  if (stats.awaiting_approval) parts.push(`${stats.awaiting_approval} 项待批准`)
-  if (stats.generation_failed) parts.push(`${stats.generation_failed} 项生成失败`)
-  if (stats.approved) parts.push(`${stats.approved} 项已批准`)
+  if (stats.awaiting_approval) parts.push(`${stats.awaiting_approval} 项${TASK_STATUS_LABELS.awaiting_approval}`)
+  if (stats.generation_failed) parts.push(`${stats.generation_failed} 项${TASK_STATUS_LABELS.generation_failed}`)
+  if (stats.approved) parts.push(`${stats.approved} 项${TASK_STATUS_LABELS.approved}`)
   return parts.join(' · ')
 })
-const filterLabels: Array<[TaskSummary['status'], string]> = [
-  ['awaiting_approval', '待批准'], ['generation_failed', '生成失败'], ['generating', '方案生成中'],
-  ['draft', '待生成'], ['approved', '已批准'],
-]
+const filterLabels = TASK_STATUS_ORDER.map(value => [value, TASK_STATUS_LABELS[value]] as const)
 // Only statuses that actually have tasks right now; the row stays quiet otherwise.
 const filterOptions = computed(() => {
   const stats: TaskStats | null = taskStore.stats
@@ -45,9 +36,6 @@ const filterOptions = computed(() => {
 })
 // The label must outlive the option: a task can leave the filter while it is selected.
 const activeFilterLabel = computed(() => filterLabels.find(([value]) => value === taskStore.filter)?.[1] ?? '')
-function repositoryName(url: string): string {
-  return url.replace('https://github.com/', '')
-}
 </script>
 
 <template>
@@ -86,7 +74,7 @@ function repositoryName(url: string): string {
             <span class="row-repository">{{ repositoryName(task.repository_url) }}</span>
           </span>
           <span class="row-meta">
-            <span class="status" :data-tone="statusTones[task.status]">{{ statusLabels[task.status] }}</span>
+            <span class="status" :data-tone="TASK_STATUS_TONES[task.status]">{{ TASK_STATUS_LABELS[task.status] }}</span>
             <time :datetime="task.updated_at">{{ formatDateTime(task.updated_at) }}</time>
           </span>
         </a>

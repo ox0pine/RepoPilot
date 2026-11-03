@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-import signal
 import stat
 import tempfile
 from collections.abc import AsyncIterator
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from repopilot.domain.tasks import normalize_baseline_commit, normalize_github_repository_url
+from repopilot.execution.process import OutputLimitExceeded, run_command
 
 GitAuthStrategy = Literal['https_token', 'ssh_key']
 
@@ -40,10 +40,9 @@ class GitHubGitCredentials:
 class GitAuthContext:
     repository_url: str
     environment: dict[str, str]
-    strategy: GitAuthStrategy
 
 
-def _base_environment(home: Path) -> dict[str, str]:
+def base_git_environment(home: Path) -> dict[str, str]:
     # This is a complete environment, not an overlay. Callers must pass it directly
     # so inherited Git directory, object-alternate, helper and askpass values cannot
     # redirect trusted control-plane operations.
@@ -84,7 +83,7 @@ async def github_git_auth(
     with tempfile.TemporaryDirectory(prefix='repopilot-git-auth-') as temporary:
         root = Path(temporary)
         root.chmod(0o700)
-        environment = _base_environment(root)
+        environment = base_git_environment(root)
         if strategy == 'https_token':
             if not credentials.api_token:
                 raise GitOperationError('GitHub HTTPS clone requires a saved API token')
@@ -109,7 +108,7 @@ async def github_git_auth(
                 'GIT_CONFIG_KEY_6': 'credential.useHttpPath',
                 'GIT_CONFIG_VALUE_6': 'true',
             })
-            yield GitAuthContext(repository_url, environment, strategy)
+            yield GitAuthContext(repository_url, environment)
             return
         if strategy == 'ssh_key':
             if not credentials.private_key:
@@ -126,7 +125,7 @@ async def github_git_auth(
                 '-o', f'UserKnownHostsFile={known_hosts}', '-o', f'GlobalKnownHostsFile={os.devnull}',
             ])
             path = repository_url.removeprefix('https://github.com/')
-            yield GitAuthContext(f'git@github.com:{path}.git', environment, strategy)
+            yield GitAuthContext(f'git@github.com:{path}.git', environment)
             return
         raise GitOperationError('Unsupported GitHub Git authentication strategy')
 
@@ -170,48 +169,16 @@ async def _git(
     timeout: float,
 ) -> tuple[bytes, bytes]:
     try:
-        process = await asyncio.create_subprocess_exec(
-            'git', *arguments, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=environment, start_new_session=True,
+        code, out, err = await run_command(
+            ['git', *arguments], env=environment, timeout=timeout, limit=MAX_GIT_OUTPUT,
+            poll=lambda: _source_usage(destination),
         )
+    except OutputLimitExceeded:
+        raise GitOperationError('Git output exceeds safety limit') from None
     except OSError:
         raise GitOperationError('Git is unavailable on the trusted control plane') from None
-
-    async def collect(stream: asyncio.StreamReader) -> bytes:
-        value = bytearray()
-        while chunk := await stream.read(65536):
-            if len(value) + len(chunk) > MAX_GIT_OUTPUT:
-                raise GitOperationError('Git output exceeds safety limit')
-            value.extend(chunk)
-        return bytes(value)
-
-
-    stdout = asyncio.create_task(collect(process.stdout))
-    stderr = asyncio.create_task(collect(process.stderr))
-    waiter = asyncio.create_task(process.wait())
-    try:
-        async with asyncio.timeout(timeout):
-            while not waiter.done():
-                for task in (stdout, stderr):
-                    if task.done():
-                        task.result()
-                _source_usage(destination)
-                await asyncio.sleep(0.1)
-            await waiter
-            out, err = await asyncio.gather(stdout, stderr)
-    except BaseException:
-        for task in (stdout, stderr, waiter):
-            task.cancel()
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await process.wait()
-        await asyncio.gather(stdout, stderr, waiter, return_exceptions=True)
-        raise
     _source_usage(destination)
-    if process.returncode:
+    if code:
         raise GitOperationError('Authenticated Git operation failed')
     return out, err
 

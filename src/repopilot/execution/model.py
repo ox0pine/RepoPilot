@@ -42,10 +42,15 @@ class ModelClient:
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.transport = transport
 
+    @staticmethod
+    def payload(settings: StoredModelSettings, messages: list[dict]) -> dict:
+        """The exact outbound body; budget accounting must reuse it."""
+        return {'model': settings.model, 'messages': messages, 'tools': tool_definitions(), 'stream': False}
+
     async def complete(self, settings: StoredModelSettings, messages: list[dict], seen_call_ids: set[str]) -> ModelReply:
         if not settings.model.strip():
             raise ModelError('请先在设置中配置并选择模型')
-        payload = {'model': settings.model, 'messages': messages, 'tools': tool_definitions(), 'stream': False}
+        payload = self.payload(settings, messages)
         headers = {'Authorization': f'Bearer {settings.api_key}'} if settings.api_key else {}
         try:
             async with asyncio.timeout(MODEL_TIMEOUT_SECONDS):

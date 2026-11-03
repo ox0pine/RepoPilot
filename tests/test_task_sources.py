@@ -11,7 +11,6 @@ from repopilot.domain.tasks import CreateTask, TaskError
 from repopilot.integration.task_sources import GitHubSourceClient, ISSUE_BODY_LIMIT
 
 
-pytestmark = pytest.mark.asyncio
 TOKEN = "source-test-token-not-a-real-credential"
 SHA = "ab" * 20
 UPSTREAM_SECRET = "upstream-private-response-marker"

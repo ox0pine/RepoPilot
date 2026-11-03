@@ -4,19 +4,17 @@ import asyncio
 import os
 import subprocess
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
 import pytest
+from factories import PATCH, completed_run, make_goal, make_source
 from pydantic import ValidationError
-from test_tasks import database as database
 
-from repopilot.domain.context import RepositoryContext
 from repopilot.domain.runs import CreateDeliveryRequest, CreateRunRequest, RunDelivery
-from repopilot.domain.tasks import GoalContent, SourceSnapshot, TaskError
+from repopilot.domain.tasks import TaskError
 from repopilot.execution.git import GitHubGitCredentials
 from repopilot.integration import delivery as delivery_module
 from repopilot.integration.delivery import DeliveryService
@@ -25,54 +23,17 @@ from repopilot.persistence.runs import RunRepository
 from repopilot.persistence.tasks import TaskRepository
 
 
-PATCH = 'diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-old\n+new\n'
-
-
 def test_delivery_request_is_explicit_and_option_free():
     assert CreateDeliveryRequest().model_dump() == {}
     with pytest.raises(ValidationError):
         CreateDeliveryRequest(branch='main')
 
 
-def source() -> SourceSnapshot:
-    now = datetime.now(UTC)
-    return SourceSnapshot(
-        repository_url='https://github.com/example/repo', baseline_commit='a' * 40,
-        issue_number=1, issue_title='Repair value', issue_body='Body',
-        issue_url='https://github.com/example/repo/issues/1', issue_updated_at=now,
-        fetched_at=now, repository_context=RepositoryContext(
-            commit='a' * 40, tree=[], files=[], omissions=['fixture'], tree_truncated=False,
-        ),
-    )
-
-
-async def completed_run(database, patch=PATCH):
-    tasks, runs = TaskRepository(database), RunRepository(database)
-    task = await tasks.create(source())
-    attempt = await tasks.start_generation(task.id, task.revision, 'generate')
-    goal = GoalContent(
-        summary='Repair', scope=['value'], non_goals=[], acceptance_criteria=['fixed'],
-        plan=['edit'], open_questions=[],
-    )
-    task = await tasks.complete_generation(task.id, attempt.generation_id, goal, 'test')
-    task = await tasks.approve(task.id, task.revision, task.current_goal_version)
-    run = await runs.create(task.id, CreateRunRequest(
-        expected_revision=task.revision, goal_version=task.current_goal_version,
-    ))
-    claimed = await runs.claim()
-    assert claimed is not None
-    finished = await runs.finish(
-        run.id, claimed.worker_token, status='completed', report='done', patch=patch,
-    )
-    assert finished is not None
-    return task, finished
-
-
 async def test_delivery_rejects_noncompleted_empty_and_missing_artifacts(database):
     tasks, runs, deliveries = TaskRepository(database), RunRepository(database), DeliveryRepository(database)
-    task = await tasks.create(source())
+    task = await tasks.create(make_source())
     attempt = await tasks.start_generation(task.id, task.revision, 'generate')
-    goal = GoalContent(summary='Repair', scope=['value'], non_goals=[], acceptance_criteria=['fixed'], plan=['edit'], open_questions=[])
+    goal = make_goal(summary='Repair', scope=['value'], acceptance_criteria=['fixed'], plan=['edit'])
     task = await tasks.complete_generation(task.id, attempt.generation_id, goal, 'test')
     task = await tasks.approve(task.id, task.revision, 1)
     queued = await runs.create(task.id, CreateRunRequest(expected_revision=task.revision, goal_version=1))
@@ -189,17 +150,7 @@ def local_boundaries(monkeypatch, remote: Path) -> None:
 
 
 async def local_claim(database, baseline: str, patch: str = PATCH):
-    snapshot = source().model_copy(update={'baseline_commit': baseline})
-    tasks, runs = TaskRepository(database), RunRepository(database)
-    task = await tasks.create(snapshot)
-    attempt = await tasks.start_generation(task.id, task.revision, 'generate')
-    goal = GoalContent(summary='Repair', scope=['value'], non_goals=[], acceptance_criteria=['fixed'], plan=['edit'], open_questions=[])
-    task = await tasks.complete_generation(task.id, attempt.generation_id, goal, 'test')
-    task = await tasks.approve(task.id, task.revision, 1)
-    run = await runs.create(task.id, CreateRunRequest(expected_revision=task.revision, goal_version=1))
-    running = await runs.claim()
-    assert running is not None
-    await runs.finish(run.id, running.worker_token, status='completed', patch=patch)
+    task, run = await completed_run(database, patch, baseline=baseline)
     claim = await DeliveryRepository(database).claim(task.id, run.id)
     assert isinstance(claim, DeliveryClaim)
     return claim

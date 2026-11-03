@@ -22,6 +22,14 @@ def normalize_base_url(value: str) -> str:
     return normalized
 
 
+def resolve_api_key(
+    *, base_url: str, api_key: str | None, saved_base_url: str, saved_api_key: str,
+) -> str:
+    """Keep the saved key only while the endpoint is unchanged; both the cache key
+    and the persisted value must come from this single rule."""
+    return api_key.strip() if api_key is not None else (saved_api_key if base_url == saved_base_url else "")
+
+
 class ModelSettings(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     model: str = ""

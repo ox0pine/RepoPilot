@@ -7,6 +7,8 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
+from repopilot.execution.paths import relative_path
+
 from .positions import apply_text_edits, from_lsp_position, to_lsp_position
 from .protocol import JsonRpcError, ProtocolError
 from .session import Session, document_uri
@@ -29,14 +31,9 @@ SOURCE_SUFFIXES = {'.py', '.pyi', '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', 
 
 
 def safe_path(path: str, *, directory: bool = False) -> str:
-    if directory and path in ('', '.'):
-        return '.'
-    if not isinstance(path, str) or '\x00' in path or '\\' in path or path.startswith('/'):
-        raise ValueError('Invalid workspace path')
-    parts = path.split('/')
-    if any(part in ('', '.', '..', '.git', 'node_modules', '.venv') for part in parts):
-        raise ValueError('Unsafe workspace path')
-    return path
+    return relative_path(
+        path, allow_dot=directory, deny=frozenset({'.git', 'node_modules', '.venv'}),
+    )
 
 
 def uri_path(uri: str) -> str | None:

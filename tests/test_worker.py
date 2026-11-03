@@ -9,27 +9,23 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from conftest import real_docker, schema_database
 from cryptography.fernet import Fernet
+from factories import approved_task, make_request
 from pydantic import SecretStr
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from test_runs import approved_task, request
-from test_tasks import database as database
-from test_tasks import ready
-from test_workspace import TOKEN, command, real_docker, source
+from test_workspace import TOKEN, command
 
 from repopilot.domain.settings import ensure_ssh_pair
 from repopilot.domain.tasks import TaskError
 from repopilot.execution import workspace as workspace_module
 from repopilot.execution.engine import ExecutionEngine, ExecutionResult
 from repopilot.execution.workspace import Workspace, WorkspaceError
-from repopilot.persistence.database import Database, GitHubSettingsRow, ModelSettingsRow, TaskRow
+from repopilot.persistence.database import GitHubSettingsRow, ModelSettingsRow, TaskRow
 from repopilot.persistence.runs import RunRepository, RunRow
 from repopilot.persistence.settings import GitHubSettingsRepository, SettingsRepository
-from repopilot.persistence.tasks import TaskRepository
 from repopilot.worker import Worker
 
-pytestmark = pytest.mark.asyncio
 LOCK_KEY = 721804630
 
 
@@ -78,22 +74,20 @@ class ControlledEngine:
         self.git_auth_strategies = []
         self.waiting = asyncio.Queue()
 
-    async def run(self, *, run_id, source, goal, model, github_credentials, git_auth_strategy, image, emit):
+    async def run(self, *, run_id, source, goal, model, github_credentials, git_auth_strategy, image, sink):
         self.git_auth_strategies.append(git_auth_strategy)
         self.calls.append(run_id)
         self.started.put_nowait(run_id)
         self.entered.set()
         try:
-            await emit('state', {
-                'status': 'environment_ready', 'setup_command': 'automatic dependency setup',
-                'check_command': 'python -m pytest',
-            })
-            await emit('check', {
+            await sink.metadata(setup_command='automatic dependency setup',
+                                check_command='python -m pytest')
+            await sink.event('check', {
                 'phase': 'baseline', 'command': 'python -m pytest',
                 'exit_code': 0, 'output': 'Baseline passed',
             })
             if self.emit_event:
-                await emit('tool_start', {'call_id': 'effect-1', 'name': 'shell'})
+                await sink.event('tool_start', {'call_id': 'effect-1', 'name': 'shell'})
                 self.effects.append(run_id)
             self.waiting.put_nowait(run_id)
             await self.release.get()
@@ -125,7 +119,7 @@ async def running_worker(database, repositories, engine):
 
 async def enqueue(database, number=1):
     task = await approved_task(database, number)
-    run = await RunRepository(database).create(task.id, request(task))
+    run = await RunRepository(database).create(task.id, make_request(task))
     return task, run
 
 
@@ -272,6 +266,9 @@ async def test_automatic_commands_are_saved_before_baseline(database, repositori
         assert detail.setup_command == 'automatic dependency setup'
         assert detail.check_command == 'python -m pytest'
         assert detail.checks[0].phase == 'baseline'
+        # finish() is the only terminal-state writer: no engine lifecycle event
+        # duplicates the persisted image or the environment_ready command state.
+        assert [event.payload for event in detail.events if event.kind == 'state'] == [{'status': 'completed'}]
         stop.set()
         await asyncio.wait_for(job, 5)
 
@@ -300,7 +297,7 @@ class DockerSleepEngine:
     """Actual Workspace/Docker; no model is needed to exercise cancellation."""
 
     async def run(self, *, run_id, source, goal, model, github_credentials, git_auth_strategy,
-                  image, emit):
+                  image, sink):
         workspace = Workspace(run_id)
         original_clone = workspace_module.clone_fixed_commit
         async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
@@ -314,11 +311,9 @@ class DockerSleepEngine:
                 source=source, github_credentials=github_credentials,
                 git_auth_strategy=git_auth_strategy, image=image,
             )
-            await emit('state', {'image_id': image_id})
-            await emit('state', {
-                'status': 'environment_ready', 'setup_command': '', 'check_command': 'true',
-            })
-            await emit('tool_start', {'call_id': 'sleep-real', 'name': 'shell'})
+            await sink.metadata(image_id=image_id)
+            await sink.metadata(setup_command='', check_command='true')
+            await sink.event('tool_start', {'call_id': 'sleep-real', 'name': 'shell'})
             await workspace.shell('sleep 50 & wait')
             return ExecutionResult('completed', 'Sleep finished', '', [])
         finally:
@@ -330,10 +325,8 @@ class DockerSleepEngine:
 
 
 async def docker_run(database):
-    tasks = TaskRepository(database)
-    task = await ready(tasks, await tasks.create(source()))
-    task = await tasks.approve(task.id, task.revision, task.current_goal_version)
-    return task, await RunRepository(database).create(task.id, request(task))
+    task = await approved_task(database)
+    return task, await RunRepository(database).create(task.id, make_request(task))
 
 
 async def sleeping(run_id):
@@ -365,9 +358,7 @@ async def test_real_docker_sleep_cancel_removes_container_before_terminal(databa
 
 async def subprocess_worker(url, schema, key):
     # This child uses only the per-test schema and disposable encrypted fixture settings.
-    db = Database.__new__(Database)
-    db.engine = create_async_engine(url, hide_parameters=True, connect_args={'server_settings': {'search_path': schema}})
-    db.sessions = async_sessionmaker(db.engine, expire_on_commit=False)
+    db = schema_database(url, schema)
     stop = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
     try:

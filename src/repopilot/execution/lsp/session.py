@@ -20,7 +20,6 @@ class Session:
         self.documents: dict[str, dict] = {}
         self.diagnostics: dict[str, dict] = {}
         self.snapshot: dict[str, str] = {}
-        self.analysis_event = asyncio.Event()
         self.versionless_diagnostics = False
         self.shutdown_unconfirmed = False
         self.stderr = bytearray()
@@ -149,8 +148,7 @@ class Session:
                 if version is None:
                     self.versionless_diagnostics = True
                 if version == document['version'] or (version is None and document['version'] == 1):
-                    self.diagnostics[uri] = {'version': document['version'], 'diagnostics': params.get('diagnostics', [])[:500], 'received': asyncio.get_running_loop().time()}
-                    self.analysis_event.set()
+                    self.diagnostics[uri] = {'version': document['version'], 'diagnostics': params.get('diagnostics', [])[:500]}
         elif method == 'tsserver/request':
             # Official Vue v3 bridge and TLS 4.4.0 custom request command:
             # https://github.com/vuejs/language-tools/discussions/5456

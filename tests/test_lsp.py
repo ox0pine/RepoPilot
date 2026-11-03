@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from test_environments import node_project, prepared_workspace, python_project, real_docker
+from conftest import real_docker
+from test_environments import node_project, python_project
 
 PYTHON_FILES = {
     'pyproject.toml': python_project(),
@@ -133,15 +134,16 @@ async def diagnostics(workspace, path: str):
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('files,path,occurrence', [
     (PYTHON_FILES, 'consumer.py', 1),
     (TS_FILES, 'consumer.ts', 1),
     (REACT_FILES, 'App.tsx', 1),
     (VUE_FILES, 'App.vue', 1),
 ], ids=['python', 'typescript', 'react', 'vue'])
-async def test_real_definitions_references_diagnostics_and_crossfile_rename(files, path, occurrence):
-    async with prepared_workspace(files) as workspace:
+async def test_real_definitions_references_diagnostics_and_crossfile_rename(
+    docker_workspace, files, path, occurrence,
+):
+    async with docker_workspace(files, setup=True) as (workspace, _):
         info = await workspace.environment_info()
         assert all(project['ready'] for project in info['projects']), info
         point = public_position(files[path], 'greeting', occurrence=occurrence)
@@ -171,9 +173,8 @@ async def test_real_definitions_references_diagnostics_and_crossfile_rename(file
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_multi_file_plan_rejects_stale_hash_atomically():
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_multi_file_plan_rejects_stale_hash_atomically(docker_workspace):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         plan = await lsp(workspace, 'rename', path='consumer.py', new_name='welcome',
                          **public_position(PYTHON_FILES['consumer.py'], 'greeting', occurrence=1))
         original = await workspace.tool('read_file', {'path': 'library.py'})
@@ -190,9 +191,8 @@ async def test_real_multi_file_plan_rejects_stale_hash_atomically():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_shell_change_restarts_session_and_never_returns_stale_locations():
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_shell_change_restarts_session_and_never_returns_stale_locations(docker_workspace):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         point = public_position(PYTHON_FILES['consumer.py'], 'greeting', occurrence=1)
         old = await lsp(workspace, 'definition', path='consumer.py', **point)
         assert old['data'][0]['range']['start']['line'] == 1
@@ -206,10 +206,9 @@ async def test_real_shell_change_restarts_session_and_never_returns_stale_locati
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('path', ['../outside.py', '/etc/passwd', '.git/config', 'linked.py'])
-async def test_real_lsp_rejects_unsafe_paths_and_links(path):
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_lsp_rejects_unsafe_paths_and_links(docker_workspace, path):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         result = await workspace.shell('ln -s /etc/passwd linked.py')
         assert result.exit_code == 0, result.output
         rejected = await workspace.lsp_tool('lsp_definition', {'path': path, 'line': 1, 'column': 1})
@@ -217,11 +216,10 @@ async def test_real_lsp_rejects_unsafe_paths_and_links(path):
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_monorepo_routes_to_innermost_python_and_node_projects():
+async def test_real_monorepo_routes_to_innermost_python_and_node_projects(docker_workspace):
     files = {f'backend/{name}': text for name, text in PYTHON_FILES.items()}
     files.update({f'frontend/{name}': text for name, text in TS_FILES.items()})
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         for root, filename, fixture, library in (
             ('backend', 'consumer.py', PYTHON_FILES, 'library.py'),
             ('frontend', 'consumer.ts', TS_FILES, 'library.ts'),
@@ -232,9 +230,8 @@ async def test_real_monorepo_routes_to_innermost_python_and_node_projects():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_manifest_free_lsp_reports_unavailable_not_empty_success():
-    async with prepared_workspace({'hello.py': 'value = 1\n'}) as workspace:
+async def test_real_manifest_free_lsp_reports_unavailable_not_empty_success(docker_workspace):
+    async with docker_workspace({'hello.py': 'value = 1\n'}, setup=True) as (workspace, _):
         result = await workspace.lsp_tool('lsp_hover', {'path': 'hello.py', 'line': 1, 'column': 1})
         assert result['status'] in {'unsupported', 'not_ready'}, result
         assert result.get('reason') or result.get('message') or result.get('error') or result.get('data')
@@ -266,7 +263,6 @@ def feed_message(reader: asyncio.StreamReader, message):
     reader.feed_data(f'Content-Length: {len(body)}\r\n\r\n'.encode() + body)
 
 
-@pytest.mark.asyncio
 async def test_protocol_matches_ids_not_arrival_order():
     from repopilot.execution.lsp.protocol import JsonRpcClient
 
@@ -287,7 +283,6 @@ async def test_protocol_matches_ids_not_arrival_order():
     assert writer.closed
 
 
-@pytest.mark.asyncio
 async def test_protocol_timeout_cancels_and_ignores_late_response():
     from repopilot.execution.lsp.protocol import JsonRpcClient
 
@@ -311,7 +306,6 @@ async def test_protocol_timeout_cancels_and_ignores_late_response():
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_protocol_cancellation_cleans_pending_and_sends_cancel():
     from repopilot.execution.lsp.protocol import JsonRpcClient
 
@@ -330,7 +324,6 @@ async def test_protocol_cancellation_cleans_pending_and_sends_cancel():
         await client.close()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize('invalid', [
     {'result': 1, 'error': {'code': -1, 'message': 'both'}},
     {},
@@ -355,7 +348,6 @@ async def test_protocol_invalid_responses_and_ids_fail_pending_boundedly(invalid
         await client.close()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize('wire', [
     b'Content-Length: 0\r\n\r\n',
     b'Content-Length: 999999999\r\n\r\n',
@@ -377,7 +369,6 @@ async def test_protocol_invalid_framing_fails_without_unbounded_read(wire):
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_protocol_server_crash_fails_all_pending_requests_and_closes_writer():
     from repopilot.execution.lsp.protocol import JsonRpcClient, ProtocolError
 
@@ -400,12 +391,11 @@ async def test_protocol_server_crash_fails_all_pending_requests_and_closes_write
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('unsafe', ['../outside.py', '/etc/passwd', '.git/config', 'linked.py'])
-async def test_real_apply_helper_rejects_unsafe_plan_paths(unsafe):
+async def test_real_apply_helper_rejects_unsafe_plan_paths(docker_workspace, unsafe):
     from repopilot.execution.workspace import ToolError
 
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         result = await workspace.shell('ln -s /etc/passwd linked.py')
         assert result.exit_code == 0, result.output
         original = await workspace.tool('read_file', {'path': 'library.py'})
@@ -423,8 +413,9 @@ async def test_real_apply_helper_rejects_unsafe_plan_paths(unsafe):
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_cancelled_semantic_request_closes_language_server_processes(monkeypatch):
+async def test_real_cancelled_semantic_request_closes_language_server_processes(
+    docker_workspace, monkeypatch,
+):
     from repopilot.execution.lsp.protocol import JsonRpcClient
 
     original_request = JsonRpcClient.request
@@ -436,7 +427,7 @@ async def test_real_cancelled_semantic_request_closes_language_server_processes(
             await asyncio.Event().wait()
         return await original_request(self, method, params, **kwargs)
 
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         monkeypatch.setattr(JsonRpcClient, 'request', controlled_request)
         pending = asyncio.create_task(workspace.lsp_tool('lsp_hover', {
             'path': 'consumer.py', **public_position(PYTHON_FILES['consumer.py'], 'greeting', occurrence=1),
@@ -465,9 +456,8 @@ async def test_real_cancelled_semantic_request_closes_language_server_processes(
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_absent_capability_is_unsupported_not_empty_success():
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_absent_capability_is_unsupported_not_empty_success(docker_workspace):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         point = public_position(PYTHON_FILES['consumer.py'], 'greeting', occurrence=1)
         await lsp(workspace, 'hover', path='consumer.py', **point)
         session = next(iter(workspace._lsp_manager.sessions.values()))
@@ -479,9 +469,8 @@ async def test_real_absent_capability_is_unsupported_not_empty_success():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_python_navigation_symbols_calls_and_code_action_listing():
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_python_navigation_symbols_calls_and_code_action_listing(docker_workspace):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         point = public_position(PYTHON_FILES['consumer.py'], 'greeting', occurrence=1)
         hover = await lsp(workspace, 'hover', path='consumer.py', **point)
         assert hover['data'], hover
@@ -503,10 +492,9 @@ async def test_real_python_navigation_symbols_calls_and_code_action_listing():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_typescript_format_returns_reviewable_plan_then_applies():
+async def test_real_typescript_format_returns_reviewable_plan_then_applies(docker_workspace):
     files = {**TS_FILES, 'messy.ts': 'export const answer={value:42,label:"fixture"};\n'}
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         formatted = await lsp(workspace, 'format', path='messy.ts', tab_size=2, insert_spaces=True)
         assert formatted['plan_id'], formatted
         assert formatted['data']['files'] == 1
@@ -538,8 +526,7 @@ def test_external_or_escaping_edit_uris_are_not_workspace_paths(uri):
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_typescript_type_definition_and_implementation():
+async def test_real_typescript_type_definition_and_implementation(docker_workspace):
     files = {
         **TS_FILES,
         'types.ts': 'export interface Greeter { greet(name: string): string; }\n',
@@ -550,7 +537,7 @@ async def test_real_typescript_type_definition_and_implementation():
             'instance.greet("hello");\n'
         ),
     }
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         definition = await lsp(workspace, 'type_definition', path='typed.ts', line=4, column=1)
         assert any(item.get('path') == 'types.ts' for item in definition['data']), definition
         implementation = await lsp(workspace, 'implementation', path='types.ts', line=1, column=18)
@@ -558,9 +545,8 @@ async def test_real_typescript_type_definition_and_implementation():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_workspace_plan_rejects_stale_document_version_before_application():
-    async with prepared_workspace(PYTHON_FILES) as workspace:
+async def test_real_workspace_plan_rejects_stale_document_version_before_application(docker_workspace):
+    async with docker_workspace(PYTHON_FILES, setup=True) as (workspace, _):
         await lsp(workspace, 'hover', path='consumer.py', line=1, column=21)
         manager = workspace._lsp_manager
         snapshot = await manager._snapshot()
@@ -576,10 +562,9 @@ async def test_real_workspace_plan_rejects_stale_document_version_before_applica
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_python_format_uses_ruff_and_applies_version_checked_plan():
+async def test_real_python_format_uses_ruff_and_applies_version_checked_plan(docker_workspace):
     files = {**PYTHON_FILES, 'messy.py': 'answer={"value":42,"label":"fixture"}\n'}
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         formatted = await lsp(workspace, 'format', path='messy.py')
         assert formatted['plan_id'], formatted
         assert formatted['data']['files'] == 1
@@ -609,7 +594,6 @@ def test_monorepo_routing_chooses_innermost_manifest_for_document_language():
     assert manager._project(projects, 'library.py') == projects[0]
 
 
-@pytest.mark.asyncio
 async def test_protocol_server_error_is_not_empty_success():
     from repopilot.execution.lsp.protocol import JsonRpcClient, JsonRpcError
 
@@ -628,7 +612,6 @@ async def test_protocol_server_error_is_not_empty_success():
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_code_action_command_cannot_be_discarded_to_claim_edit_success():
     from repopilot.execution.lsp import LspManager
     from repopilot.execution.lsp.session import Session
@@ -649,7 +632,6 @@ async def test_code_action_command_cannot_be_discarded_to_claim_edit_success():
     assert manager.plans == {}
 
 
-@pytest.mark.asyncio
 async def test_code_action_ids_are_opaque_and_expire_on_workspace_change():
     from repopilot.execution.lsp import LspManager
 
@@ -662,7 +644,6 @@ async def test_code_action_ids_are_opaque_and_expire_on_workspace_change():
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('path,text,needle,bad_path,bad_text', [
     ('index.html', '<!DOCTYPE html><html><body><div>fixture</div></body></html>\n',
      'div', 'broken.html', '<html><head><style>.widget { color: ; }</style></head><body></body></html>\n'),
@@ -671,7 +652,9 @@ async def test_code_action_ids_are_opaque_and_expire_on_workspace_change():
     ('document.json', '{"$schema":"./schema.json","value":42}\n',
      'value', 'broken.json', '{"value": }\n'),
 ], ids=['html', 'css', 'json'])
-async def test_real_frontend_document_hover_diagnostics_and_format(path, text, needle, bad_path, bad_text):
+async def test_real_frontend_document_hover_diagnostics_and_format(
+    docker_workspace, path, text, needle, bad_path, bad_text,
+):
     files = {
         'package.json': node_project(engines={'node': '>=22 <23'}),
         path: text,
@@ -682,7 +665,7 @@ async def test_real_frontend_document_hover_diagnostics_and_format(path, text, n
             }},
         }),
     }
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         hovered = await lsp(workspace, 'hover', path=path, **public_position(text, needle))
         assert hovered['data'], hovered
         reports = await diagnostics(workspace, bad_path)
@@ -701,11 +684,12 @@ async def test_real_frontend_document_hover_diagnostics_and_format(path, text, n
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('files,path', [(TS_FILES, 'consumer.ts'), (REACT_FILES, 'App.tsx')],
                          ids=['typescript', 'react'])
-async def test_real_typescript_import_binding_rename_preserves_export(files, path):
-    async with prepared_workspace(files) as workspace:
+async def test_real_typescript_import_binding_rename_preserves_export(
+    docker_workspace, files, path,
+):
+    async with docker_workspace(files, setup=True) as (workspace, _):
         plan = await lsp(workspace, 'rename', path=path, new_name='localWelcome',
                          **public_position(files[path], 'greeting', occurrence=1))
         assert plan['data']['files'] == 1, plan

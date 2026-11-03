@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
-import signal
 import tempfile
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -18,6 +16,8 @@ from repopilot.execution.git import (
     clone_fixed_commit,
     github_git_auth,
 )
+from repopilot.execution.process import OutputLimitExceeded, run_command
+from repopilot.integration import github_http
 from repopilot.persistence.deliveries import DeliveryClaim, DeliveryRepository
 from repopilot.persistence.settings import GitHubSettingsRepository, SettingsStorageError
 
@@ -29,73 +29,25 @@ async def _git(
     *args: str, cwd: Path, environment: dict[str, str], data: bytes | None = None,
     allowed: tuple[int, ...] = (0,),
 ) -> tuple[int, str]:
-    process = None
-    reader = writer = waiter = None
-
-    async def read_output(stream: asyncio.StreamReader) -> bytes:
-        value = bytearray()
-        while chunk := await stream.read(8192):
-            if len(value) + len(chunk) > OUTPUT_LIMIT:
-                raise TaskError(502, 'GitHub Git 操作输出超过安全上限')
-            value.extend(chunk)
-        return bytes(value)
-
-    async def write_input(stream: asyncio.StreamWriter) -> None:
-        if data is not None:
-            stream.write(data)
-            await stream.drain()
-        stream.close()
-        await stream.wait_closed()
-
     try:
-        process = await asyncio.create_subprocess_exec(
-            'git', *args, cwd=cwd, env=environment,
-            stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
+        code, output, _ = await run_command(
+            ['git', *args], cwd=cwd, env=environment, data=data,
+            merge_stderr=True, limit=OUTPUT_LIMIT, timeout=GIT_TIMEOUT,
         )
-        assert process.stdout is not None
-        reader = asyncio.create_task(read_output(process.stdout))
-        writer = asyncio.create_task(write_input(process.stdin)) if process.stdin is not None else None
-        waiter = asyncio.create_task(process.wait())
-        async with asyncio.timeout(GIT_TIMEOUT):
-            results = await asyncio.gather(
-                reader, waiter, *([writer] if writer is not None else []),
-            )
-        output = results[0]
+    except OutputLimitExceeded:
+        raise TaskError(502, 'GitHub Git 操作输出超过安全上限') from None
     except TimeoutError:
         raise TaskError(504, 'GitHub 分支提交超时；结果可能未知，请重新提交以核对同一分支') from None
     except OSError:
         raise TaskError(503, '控制面缺少 Git，无法提交修复分支') from None
-    finally:
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if process is not None:
-            await process.wait()
-        tasks = [task for task in (reader, writer, waiter) if task is not None]
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-    if process.returncode not in allowed:
+    if code not in allowed:
         raise TaskError(502, 'GitHub Git 操作失败；未提交或未确认修复分支')
-    return process.returncode, output.decode('utf-8', errors='replace').strip()
+    return code, output.decode('utf-8', errors='replace').strip()
 
 
 def _coordinates(repository_url: str) -> tuple[str, str]:
     owner, repository = urlsplit(repository_url).path.strip('/').removesuffix('.git').split('/', 1)
     return owner, repository
-
-
-def _headers(token: str) -> dict[str, str]:
-    return {
-        'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'RepoPilot',
-    }
 
 
 def _json_object(response: httpx.Response) -> dict:
@@ -159,9 +111,8 @@ class DeliveryService:
 
     async def _deliver(self, claim: DeliveryClaim, credentials: GitHubGitCredentials) -> dict:
         owner, repository = _coordinates(claim.source.repository_url)
-        async with httpx.AsyncClient(
-            base_url='https://api.github.com', headers=_headers(credentials.api_token), timeout=20,
-            follow_redirects=False, trust_env=False, transport=self.transport,
+        async with github_http.client(
+            self.transport, timeout=20, token=credentials.api_token,
         ) as client:
             user_response, repo_response = await asyncio.gather(
                 client.get('/user'), client.get(f'/repos/{owner}/{repository}'),

@@ -26,6 +26,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
+from repopilot.domain.limits import (
+    MAX_CHECKS_BYTES,
+    MAX_EVENT_BYTES,
+    MAX_EVENTS,
+    MAX_PATCH_BYTES,
+    MAX_REPORT_BYTES,
+)
 from repopilot.domain.runs import (
     EVENT_KINDS,
     TERMINAL_STATUSES,
@@ -36,15 +43,11 @@ from repopilot.domain.runs import (
     RunEvent,
     RunSummary,
 )
+from repopilot.domain.secrets import redact_secrets, secret_values
 from repopilot.domain.settings import normalize_base_url
 from repopilot.domain.tasks import GoalContent, SourceSnapshot, TaskError
 from repopilot.persistence.database import Base, Database, TaskGoalRow, TaskRow
 
-MAX_EVENTS = 256
-MAX_EVENT_BYTES = 32 * 1024
-MAX_REPORT_BYTES = 64 * 1024
-MAX_PATCH_BYTES = 8 * 1024 * 1024
-MAX_CHECKS_BYTES = 1024 * 1024
 LIMIT_ERROR = '成果超过保存上限，未生成完整Patch'
 
 
@@ -96,24 +99,18 @@ class RunEventRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-def _redact(value, secrets: tuple[str, ...]):
-    if isinstance(value, str):
-        for secret in secrets:
-            value = value.replace(secret, '[REDACTED]')
-        return value
-    if isinstance(value, list):
-        return [_redact(item, secrets) for item in value]
-    if isinstance(value, dict):
-        return {_redact(key, secrets): _redact(item, secrets) for key, item in value.items()}
-    return value
-
-
-def _secrets(values: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted({value for value in values if value}, key=len, reverse=True))
-
-
 def _json_size(value) -> int:
     return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8'))
+
+
+def expect_revision(row, expected: int) -> None:
+    if row.revision != expected:
+        raise TaskError(409, '目标已更新，请重新确认')
+
+
+async def active_run_id(session: AsyncSession, task_id: UUID) -> UUID | None:
+    return await session.scalar(select(RunRow.id).where(
+        RunRow.task_id == task_id, RunRow.status.in_(['queued', 'running'])))
 
 
 class RunRepository:
@@ -137,7 +134,9 @@ class RunRepository:
         from repopilot.persistence.deliveries import DeliveryRepository, RunDeliveryRow
 
         events = (await session.scalars(select(RunEventRow).where(
-            RunEventRow.run_id == row.id).order_by(RunEventRow.id).limit(MAX_EVENTS))).all()
+            RunEventRow.run_id == row.id).order_by(RunEventRow.id.desc()).limit(MAX_EVENTS))).all()
+        # Newest first so the persisted terminal state is never the dropped row.
+        events = list(reversed(events))
         delivery = DeliveryRepository.public(await session.get(RunDeliveryRow, row.id))
         return RunDetail(
             **self._summary(row).model_dump(), image=row.image, image_id=row.image_id,
@@ -174,12 +173,10 @@ class RunRepository:
             task = await session.scalar(select(TaskRow).where(TaskRow.id == task_id).with_for_update())
             if task is None:
                 raise TaskError(404, '对话不存在')
-            if task.revision != payload.expected_revision:
-                raise TaskError(409, '目标已更新，请重新确认')
+            expect_revision(task, payload.expected_revision)
             if task.status != 'approved' or task.current_goal_version != payload.goal_version or task.approved_goal_version != payload.goal_version:
                 raise TaskError(409, '只能执行最新的已批准目标')
-            active = await session.scalar(select(RunRow.id).where(RunRow.task_id == task_id, RunRow.status.in_(['queued', 'running'])))
-            if active is not None:
+            if await active_run_id(session, task_id) is not None:
                 raise TaskError(409, '执行尚未结束，请先取消或等待完成')
             goal = await session.get(TaskGoalRow, (task_id, payload.goal_version))
             if goal is None:
@@ -307,7 +304,7 @@ class RunRepository:
     async def append_event(self, run_id: UUID, worker_token: UUID, kind: str, payload: dict, *, secrets: Iterable[str] = ()) -> bool:
         if kind not in EVENT_KINDS or not isinstance(payload, dict):
             raise TaskError(422, '执行事件格式无效')
-        payload = _redact(payload, _secrets(secrets))
+        payload = redact_secrets(payload, secret_values(secrets))
         try:
             size = _json_size(payload)
         except (ValueError, TypeError):
@@ -319,7 +316,7 @@ class RunRepository:
             if not self._owned(row, worker_token):
                 return False
             count = await session.scalar(select(func.count()).select_from(RunEventRow).where(RunEventRow.run_id == run_id))
-            if count >= MAX_EVENTS - 1:
+            if count >= MAX_EVENTS:
                 raise TaskError(409, '执行事件数量达到上限')
             if kind == 'check':
                 try:
@@ -334,7 +331,7 @@ class RunRepository:
             session.add(RunEventRow(run_id=run_id, kind=kind, payload=payload, created_at=now))
             return True
 
-    async def record_cleanup_error(self, run_id: UUID, worker_token: UUID, *, secrets: Iterable[str] = ()) -> bool:
+    async def record_cleanup_error(self, run_id: UUID, worker_token: UUID) -> bool:
         """Keep running on cleanup failure; a later worker must retry recovery."""
         async with self._transaction() as session:
             row = await self._locked(session, run_id)
@@ -350,10 +347,10 @@ class RunRepository:
     ) -> RunDetail | None:
         if status not in TERMINAL_STATUSES:
             raise TaskError(422, '无效的执行终态')
-        known = _secrets(secrets)
-        report = _redact(report, known)
-        error = _redact(error, known)
-        stored_checks = _redact([RunCheck.model_validate(check).model_dump(mode='json') for check in checks], known)
+        known = secret_values(secrets)
+        report = redact_secrets(report, known)
+        error = redact_secrets(error, known)
+        stored_checks = redact_secrets([RunCheck.model_validate(check).model_dump(mode='json') for check in checks], known)
         oversized = (len(report.encode('utf-8')) > MAX_REPORT_BYTES or len(patch.encode('utf-8')) > MAX_PATCH_BYTES or _json_size(stored_checks) > MAX_CHECKS_BYTES)
         if oversized:
             status, error, patch = 'failed', LIMIT_ERROR, ''

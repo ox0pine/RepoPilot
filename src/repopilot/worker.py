@@ -33,6 +33,38 @@ class _PersistenceFailure(Exception):
     """Leave the run recoverable rather than writing an unconfirmed outcome."""
 
 
+class _RunSink:
+    """The only writer of durable run state during execution."""
+
+    def __init__(self, repository: RunRepository, run: ClaimedRun,
+                 secrets: tuple[str, ...]) -> None:
+        self.repository = repository
+        self.run = run
+        self.secrets = secrets
+
+    async def event(self, kind: str, payload: dict) -> None:
+        try:
+            if not await self.repository.append_event(
+                self.run.id, self.run.worker_token, kind, payload, secrets=self.secrets,
+            ):
+                raise _PersistenceFailure
+        except Exception:
+            raise _PersistenceFailure from None
+
+    async def metadata(self, *, image_id: str | None = None,
+                       setup_command: str | None = None,
+                       check_command: str | None = None) -> None:
+        if image_id is not None and not await self.repository.set_image_id(
+            self.run.id, self.run.worker_token, image_id,
+        ):
+            raise _PersistenceFailure
+        if setup_command is not None and not await self.repository.set_execution_commands(
+            self.run.id, self.run.worker_token, setup_command=setup_command,
+            check_command=check_command or '',
+        ):
+            raise _PersistenceFailure
+
+
 class Worker:
     def __init__(self, database: Database, model_repository: SettingsRepository,
                  github_repository: GitHubSettingsRepository, *,
@@ -57,7 +89,7 @@ class Worker:
             lost.set()
             logger.error('Worker lock connection lost; stopping execution')
 
-    async def _cleanup(self, run: ClaimedRun, secrets: tuple[str, ...] = ()) -> bool:
+    async def _cleanup(self, run: ClaimedRun) -> bool:
         try:
             await self.engine.cleanup(run.id)
             return True
@@ -66,7 +98,7 @@ class Worker:
             # credentials, SQL parameters or untrusted repository output.
             logger.error('Run container cleanup failed; retaining running state')
             with suppress(Exception):
-                await self.repository.record_cleanup_error(run.id, run.worker_token, secrets=secrets)
+                await self.repository.record_cleanup_error(run.id, run.worker_token)
             return False
 
     async def _recover(self, stop: asyncio.Event, lost: asyncio.Event) -> bool:
@@ -120,33 +152,14 @@ class Worker:
                 return ExecutionResult('blocked', '执行需要已选择的模型和 GitHub 克隆凭据', '', [])
             git_auth_strategy = 'ssh_key' if private_key else 'https_token'
 
-            async def emit(kind: str, payload: dict) -> None:
-                nonlocal persistence_failed
-                try:
-                    if kind == 'state' and payload.get('image_id') is not None:
-                        if not await self.repository.set_image_id(run.id, run.worker_token, payload['image_id']):
-                            raise _PersistenceFailure
-                    if kind == 'state' and payload.get('status') == 'environment_ready':
-                        if not await self.repository.set_execution_commands(
-                            run.id, run.worker_token,
-                            setup_command=payload['setup_command'], check_command=payload['check_command'],
-                        ):
-                            raise _PersistenceFailure
-                    if not await self.repository.append_event(
-                        run.id, run.worker_token, kind, payload, secrets=secrets,
-                    ):
-                        raise _PersistenceFailure
-                except Exception:
-                    persistence_failed = True
-                    raise _PersistenceFailure from None
-
             if lost.is_set() or stop.is_set():
                 return ExecutionResult('cancelled', '', '', [])
             return await self.engine.run(
                 run_id=run.id, source=run.source_snapshot, goal=run.goal_content,
                 model=model,
                 github_credentials=GitHubGitCredentials(api_token=token, private_key=private_key),
-                git_auth_strategy=git_auth_strategy, image=run.image, emit=emit,
+                git_auth_strategy=git_auth_strategy, image=run.image,
+                sink=_RunSink(self.repository, run, secrets),
             )
 
         task = asyncio.create_task(execute())
@@ -198,7 +211,7 @@ class Worker:
             for watcher in (cancellation, stopping, lock_loss):
                 watcher.cancel()
             await asyncio.gather(cancellation, stopping, lock_loss, return_exceptions=True)
-            cleaned = await self._cleanup(run, secrets)
+            cleaned = await self._cleanup(run)
         if not cleaned or retain_running or persistence_failed or lost.is_set():
             return False
         finished = await self.repository.finish(

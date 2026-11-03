@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { NAlert, NButton, NInput, type InputInst } from 'naive-ui'
 import { ArrowLeft, ArrowRight, CircleAlert, GitBranch, GitCommitHorizontal, Link, Settings, ShieldCheck } from '@lucide/vue'
 import { ApiError } from '../api/client'
+import { isUnknownOutcome, messageOf, needsConfiguration } from '../lib/errors'
 import { createTask, type CreateTask } from '../api/tasks'
 import { followLink, navigate } from '../router'
 import { sessionVersion } from '../stores/session'
@@ -22,75 +23,30 @@ const uncertainResult = ref(false)
 let controller: AbortController | null = null
 let active = true
 
-// Parse the original path rather than URL.pathname: browser URL parsing would
-// silently resolve dot segments or backslashes that the backend rejects.
-function trimSource(value: string): string {
-  return value.replace(/^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '')
+// The backend owns the source rules; this form only refuses to send blanks and
+// fills per-field messages back from a 422 body.
+const REQUIRED: Record<Field, string> = {
+  repository_url: '请填写 GitHub 仓库链接',
+  baseline_commit: '请填写 40 位十六进制 commit SHA',
+  issue_url: '请填写 Issue 链接',
 }
-function githubPath(value: string): string {
-  const text = trimSource(value)
-  if (/[\s\u0000-\u0020\u007f\u0085]/.test(text)) throw new Error('GitHub 链接不能包含空白或控制字符')
-  const match = /^https:\/\/([^/?#]*)([^?#]*)$/i.exec(text)
-  const authority = match && /^github\.com(?::([0-9]+))?$/i.exec(match[1]!)
-  if (!match || !authority || (authority[1] !== undefined && Number(authority[1]) !== 443)) {
-    throw new Error('目前仅支持不含凭据、查询参数或片段的 GitHub HTTPS 链接')
-  }
-  return match[2]!
-}
-function repositoryParts(path: string): [string, string] {
-  const parts = path.split('/')
-  if (parts.length !== 3 || parts[0]) throw new Error('仓库链接格式应为 https://github.com/owner/repo')
-  const owner = parts[1]!
-  const repository = parts[2]!.endsWith('.git') ? parts[2]!.slice(0, -4) : parts[2]!
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner)
-    || !/^[A-Za-z0-9_.-]{1,100}$/.test(repository) || repository === '.' || repository === '..') {
-    throw new Error('请输入有效的 GitHub 仓库名称')
-  }
-  return [owner.toLowerCase(), repository.toLowerCase()]
-}
-function normalize(field: Field): string {
-  if (field === 'baseline_commit') {
-    const sha = trimSource(values[field])
-    if (!/^[0-9a-fA-F]{40}$/.test(sha)) throw new Error('请输入完整的 40 位十六进制 commit SHA')
-    return sha.toLowerCase()
-  }
-  const path = githubPath(values[field])
-  if (field === 'repository_url') {
-    const [owner, repository] = repositoryParts(path.endsWith('/') ? path.slice(0, -1) : path)
-    return `https://github.com/${owner}/${repository}`
-  }
-  const parts = path.split('/')
-  if (parts.length !== 5 || parts[3] !== 'issues' || !/^[0-9]+$/.test(parts[4]!)) {
-    throw new Error('Issue 链接格式应为 https://github.com/owner/repo/issues/正整数')
-  }
-  if (parts[2]!.endsWith('.git')) throw new Error('Issue 链接不能包含仓库克隆地址的 .git 后缀')
-  const [owner, repository] = repositoryParts(parts.slice(0, 3).join('/'))
-  const number = parts[4]!.replace(/^0+/, '')
-  if (!number) throw new Error('Issue 编号必须为正整数')
-  if (parts[4]!.length > 4300) throw new Error('请输入有效的 Issue 编号')
-  return `https://github.com/${owner}/${repository}/issues/${number}`
+const FIELD_ORDER: Field[] = ['repository_url', 'baseline_commit', 'issue_url']
+
+function inputFor(field: Field): InputInst | null {
+  return field === 'repository_url' ? repositoryInput.value : field === 'baseline_commit' ? commitInput.value : issueInput.value
 }
 function validate(field: Field): string | null {
-  try {
-    const normalized = normalize(field)
-    if (field === 'issue_url') {
-      let repository: string | null = null
-      try { repository = normalize('repository_url') } catch { /* Repository has its own field error. */ }
-      if (repository && normalized.slice(0, normalized.lastIndexOf('/issues/')) !== repository) {
-        throw new Error('Issue 必须属于所填写的 GitHub 仓库')
-      }
-    }
-    errors[field] = ''
-    return normalized
-  } catch (error) {
-    errors[field] = error instanceof Error ? error.message : '请输入有效的来源'
+  const value = values[field].trim()
+  if (!value) {
+    errors[field] = REQUIRED[field]
     return null
   }
+  errors[field] = ''
+  return value
 }
 function update(field: Field, value: string): void {
   values[field] = value
   errors[field] = ''
-  if (field === 'repository_url') errors.issue_url = ''
 }
 function cancelRequest(): void {
   controller?.abort()
@@ -113,8 +69,7 @@ async function submit(): Promise<void> {
   const commit = validate('baseline_commit')
   const issue = validate('issue_url')
   if (!repository || !commit || !issue) {
-    const input = !repository ? repositoryInput : !commit ? commitInput : issueInput
-    input.value?.focus()
+    inputFor(!repository ? 'repository_url' : !commit ? 'baseline_commit' : 'issue_url')?.focus()
     return
   }
   const version = sessionVersion()
@@ -125,6 +80,7 @@ async function submit(): Promise<void> {
   needsSettings.value = false
   uncertainResult.value = false
   const current = () => active && !request.signal.aborted && version === sessionVersion() && controller === request
+  let invalidField: Field | null = null
   try {
     const task = await createTask({ repository_url: repository, baseline_commit: commit, issue_url: issue }, request.signal)
     if (!current()) return
@@ -133,13 +89,22 @@ async function submit(): Promise<void> {
     emit('changed')
   } catch (error) {
     if (!current()) return
-    requestError.value = error instanceof ApiError ? error.message : '连接中断，无法确认任务是否已创建。请先查看最近任务，再决定是否重新提交。'
-    needsSettings.value = error instanceof ApiError && error.status === 503
-    uncertainResult.value = !(error instanceof ApiError) || error.status >= 500 && error.status !== 503
+    requestError.value = messageOf(error, '连接中断，无法确认任务是否已创建。请先查看最近任务，再决定是否重新提交。')
+    needsSettings.value = needsConfiguration(error)
+    uncertainResult.value = isUnknownOutcome(error)
+    if (error instanceof ApiError && Object.keys(error.fields).length) {
+      Object.assign(errors, error.fields)
+      invalidField = FIELD_ORDER.find(field => errors[field]) ?? null
+    }
   } finally {
     if (current()) {
       creating.value = false
       controller = null
+      if (invalidField) {
+        // The field was disabled while the request ran; focus after re-enabling.
+        await nextTick()
+        inputFor(invalidField)?.focus()
+      }
     }
   }
 }
@@ -161,19 +126,19 @@ async function submit(): Promise<void> {
       </section>
       <div class="field">
         <div class="field-heading"><label for="task-repository"><GitBranch :size="16" :stroke-width="1.5" aria-hidden="true" />仓库链接</label></div>
-        <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'task-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" @blur="validate('repository_url')" />
+        <NInput ref="repositoryInput" :value="values.repository_url" :disabled="creating" :status="errors.repository_url ? 'error' : undefined" placeholder="https://github.com/owner/repo" :input-props="{ id: 'task-repository', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.repository_url, 'aria-describedby': 'repository-help repository-error' }" @update:value="update('repository_url', $event)" />
         <p id="repository-help" class="field-help">GitHub 仓库主页地址。私有仓库需要相应的 GitHub token 权限。</p>
         <p v-if="errors.repository_url" id="repository-error" class="field-error" role="alert">{{ errors.repository_url }}</p>
       </div>
       <div class="field">
         <div class="field-heading"><label for="task-commit"><GitCommitHorizontal :size="16" :stroke-width="1.5" aria-hidden="true" />代码版本</label></div>
-        <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="40 位十六进制 SHA" :input-props="{ id: 'task-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" @blur="validate('baseline_commit')" />
+        <NInput ref="commitInput" class="commit-input" :value="values.baseline_commit" :disabled="creating" :status="errors.baseline_commit ? 'error' : undefined" placeholder="40 位十六进制 SHA" :input-props="{ id: 'task-commit', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.baseline_commit, 'aria-describedby': 'commit-help commit-error' }" @update:value="update('baseline_commit', $event)" />
         <p id="commit-help" class="field-help">任务每次执行都从此版本重新开始，不接受分支名或短 SHA。</p>
         <p v-if="errors.baseline_commit" id="commit-error" class="field-error" role="alert">{{ errors.baseline_commit }}</p>
       </div>
       <div class="field">
         <div class="field-heading"><label for="task-issue"><Link :size="16" :stroke-width="1.5" aria-hidden="true" />Issue 链接</label></div>
-        <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'task-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" @blur="validate('issue_url')" />
+        <NInput ref="issueInput" :value="values.issue_url" :disabled="creating" :status="errors.issue_url ? 'error' : undefined" placeholder="https://github.com/owner/repo/issues/1" :input-props="{ id: 'task-issue', autocomplete: 'off', spellcheck: false, 'aria-invalid': !!errors.issue_url, 'aria-describedby': 'issue-help issue-error' }" @update:value="update('issue_url', $event)" />
         <p id="issue-help" class="field-help">Issue 必须属于上述仓库，暂不支持 Pull Request。更换来源请新建任务。</p>
         <p v-if="errors.issue_url" id="issue-error" class="field-error" role="alert">{{ errors.issue_url }}</p>
       </div>
@@ -193,9 +158,6 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .new-task { width: 100%; max-width: 720px; padding: 0 0 32px; min-width: 0; overflow-wrap: anywhere; }
-.back-link { display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); text-decoration: none; min-height: 32px; font-size: 13px; }
-.back-link:hover { color: var(--text); }
-.back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .page-header { margin: 8px 0 24px; }
 h1 { margin: 0 0 4px; font-size: 26px; font-weight: 500; line-height: 1.3; }
 .description { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }

@@ -13,6 +13,7 @@ from repopilot.domain.tasks import (
     github_source_coordinates,
     normalize_github_issue_url,
 )
+from repopilot.integration import github_http
 
 
 ISSUE_BODY_LIMIT = 64 * 1024
@@ -55,22 +56,9 @@ class GitHubSourceClient:
         owner, repository, issue_number = github_source_coordinates(
             payload.repository_url, payload.issue_url
         )
-        headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2026-03-10",
-            "User-Agent": "RepoPilot",
-        }
         try:
             async with asyncio.timeout(35):
-                async with httpx.AsyncClient(
-                    base_url="https://api.github.com",
-                    headers=headers,
-                    timeout=15.0,
-                    follow_redirects=False,
-                    trust_env=False,
-                    transport=self.transport,
-                ) as client:
+                async with github_http.client(self.transport, timeout=15.0, token=api_token) as client:
                     async with asyncio.timeout(15):
                         response = await client.get(
                             f"/repos/{owner}/{repository}/commits/{payload.baseline_commit}"

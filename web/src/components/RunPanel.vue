@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
-import { ApiError } from '../api/client'
 import { cancelRun, createDelivery, createRun, getRun, listRuns, type RunDetail, type RunStatus, type RunSummary } from '../api/runs'
 import { sessionToken, sessionVersion } from '../stores/session'
 import { formatDateTime } from '../lib/time'
+import { isConflict, isUnknownOutcome, messageOf } from '../lib/errors'
+import { createRequestGate } from '../lib/liveRequest'
 
 const props = defineProps<{ taskId: string; revision: number; goalVersion: number; approved: boolean }>()
 const emit = defineEmits<{ changed: []; active: [value: boolean] }>()
@@ -17,11 +18,10 @@ const loading = ref(false)
 const busy = ref<'start' | 'cancel' | 'delivery' | null>(null)
 const known = ref(false)
 const uncertain = ref(false)
-let epoch = 0
 let sequence = 0
 let detailSequence = 0
 let timer: ReturnType<typeof setTimeout> | undefined
-const controllers = new Set<AbortController>()
+const gate = createRequestGate(() => props.taskId)
 const activeStatus = (status: RunStatus) => status === 'queued' || status === 'running'
 const activeRun = computed(() => runs.value.find(run => activeStatus(run.status)))
 const guarded = computed(() => !known.value || !!activeRun.value || uncertain.value || !!readError.value || !!busy.value)
@@ -120,20 +120,10 @@ function checkTone(exitCode: number | null): string {
 function checkLabel(exitCode: number | null): string {
   return exitCode === null ? '未完成' : exitCode === 0 ? '通过' : `退出码 ${exitCode}`
 }
-function message(error: unknown): string { return error instanceof Error ? error.message : '请求失败' }
 function stop(): void { if (timer !== undefined) clearTimeout(timer); timer = undefined }
 function reset(): void {
-  epoch++; sequence++; detailSequence++; stop()
-  for (const controller of controllers) controller.abort()
-  controllers.clear()
-}
-function context() {
-  const controller = new AbortController()
-  controllers.add(controller)
-  const identity = epoch
-  const version = sessionVersion()
-  const id = props.taskId
-  return { controller, id, current: () => identity === epoch && version === sessionVersion() && id === props.taskId && !controller.signal.aborted }
+  sequence++; detailSequence++; stop()
+  gate.reset()
 }
 function schedule(): void {
   stop()
@@ -148,19 +138,19 @@ function merge(value: RunDetail): void {
 async function readSelected(): Promise<void> {
   const id = selectedId.value
   if (!id) return
-  const ctx = context()
+  const ctx = gate.open()
   const order = ++detailSequence
   try {
     const value = await getRun(ctx.id, id, ctx.controller.signal)
     if (ctx.current() && order === detailSequence && id === selectedId.value) merge(value)
   } catch (error) {
-    if (ctx.current() && order === detailSequence) { readError.value = message(error); stop() }
-  } finally { controllers.delete(ctx.controller) }
+    if (ctx.current() && order === detailSequence) { readError.value = messageOf(error); stop() }
+  } finally { gate.release(ctx.controller) }
 }
 async function refresh(): Promise<void> {
   if (!sessionToken.value) return
   stop()
-  const ctx = context()
+  const ctx = gate.open()
   const order = ++sequence
   loading.value = true
   try {
@@ -173,9 +163,9 @@ async function refresh(): Promise<void> {
     if (!selectedId.value && values[0]) selectedId.value = values[0].id
     await readSelected()
   } catch (error) {
-    if (ctx.current() && order === sequence) readError.value = message(error)
+    if (ctx.current() && order === sequence) readError.value = messageOf(error)
   } finally {
-    controllers.delete(ctx.controller)
+    gate.release(ctx.controller)
     if (ctx.current() && order === sequence) { loading.value = false; schedule() }
   }
 }
@@ -187,7 +177,7 @@ async function select(id: string): Promise<void> {
 }
 async function mutate(action: 'start' | 'cancel'): Promise<void> {
   if (busy.value || (action === 'start' && !canStart.value) || (action === 'cancel' && (!detail.value || !activeStatus(detail.value.status)))) return
-  const ctx = context()
+  const ctx = gate.open()
   const cancelId = detail.value?.id
   busy.value = action
   stop()
@@ -206,21 +196,21 @@ async function mutate(action: 'start' | 'cancel'): Promise<void> {
     await refresh()
   } catch (error) {
     if (!ctx.current()) return
-    const conflict = error instanceof ApiError && error.status === 409
-    const unknown = !(error instanceof ApiError) || error.status >= 500 || error.status < 400
-    actionError.value = conflict ? '执行状态已更新，请刷新记录后再操作。' : unknown ? '暂时无法确认操作结果，请先刷新记录，避免重复提交。' : message(error)
+    const conflict = isConflict(error)
+    const unknown = isUnknownOutcome(error)
+    actionError.value = conflict ? '执行状态已更新，请刷新记录后再操作。' : unknown ? '暂时无法确认操作结果，请先刷新记录，避免重复提交。' : messageOf(error)
     uncertain.value = unknown
     emit('changed')
     // Only read to reconcile; never retry a POST automatically.
     await refresh()
   } finally {
-    controllers.delete(ctx.controller)
+    gate.release(ctx.controller)
     if (ctx.current()) { busy.value = null; schedule() }
   }
 }
 async function deliver(): Promise<void> {
   if (busy.value || !detail.value || detail.value.status !== 'completed' || !detail.value.patch || detail.value.delivery) return
-  const ctx = context()
+  const ctx = gate.open()
   const runId = detail.value.id
   busy.value = 'delivery'
   actionError.value = ''
@@ -231,14 +221,14 @@ async function deliver(): Promise<void> {
     detail.value = { ...detail.value, delivery }
   } catch (error) {
     if (!ctx.current()) return
-    const unknown = !(error instanceof ApiError) || error.status >= 500 || error.status < 400
+    const unknown = isUnknownOutcome(error)
     actionError.value = unknown
       ? '暂时无法确认分支是否已提交。请先刷新记录；再次提交会核对原分支，不会覆盖其他变更。'
-      : message(error)
+      : messageOf(error)
     uncertain.value = unknown
     await refresh()
   } finally {
-    controllers.delete(ctx.controller)
+    gate.release(ctx.controller)
     if (ctx.current()) busy.value = null
   }
 }

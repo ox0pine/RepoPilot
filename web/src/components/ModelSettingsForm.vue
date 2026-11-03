@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NForm, NFormItem, NInput, NSelect, NSpin } from 'naive-ui'
 import { KeyRound, RefreshCw } from '@lucide/vue'
 import { getSettings, refreshModels, updateModelSettings, type ModelSettings } from '../api/settings'
+import { messageOf } from '../lib/errors'
 
 const emit = defineEmits<{ busy: [value: boolean] }>()
 const keyInput = ref<InstanceType<typeof NInput> | null>(null)
@@ -24,11 +25,22 @@ const apiKeyEditing = ref(false)
 watch(saving, value => emit('busy', value), { flush: 'sync' })
 
 let refreshSequence = 0
+// Closing the dialog must not leave a credential-bearing request in flight.
+const controllers = new Set<AbortController>()
+function trackRequest(): AbortSignal {
+  const controller = new AbortController()
+  controllers.add(controller)
+  return controller.signal
+}
+function abortRequests(): void {
+  for (const controller of controllers) controller.abort()
+  controllers.clear()
+}
 async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const result = await getSettings()
+    const result = await getSettings(trackRequest())
     if (!active) return
     settings.value = result
     loadedModel.value = result.model
@@ -36,7 +48,7 @@ async function load(): Promise<void> {
     loaded.value = true
     if (settings.value.model) models.value = [settings.value.model]
   } catch (cause) {
-    if (active) error.value = cause instanceof Error ? cause.message : '无法读取模型设置，请重试。'
+    if (active) error.value = messageOf(cause, '无法读取模型设置，请重试。')
   } finally {
     if (active) loading.value = false
   }
@@ -60,7 +72,7 @@ async function refresh(): Promise<void> {
   error.value = ''
   notice.value = ''
   try {
-    const result = await refreshModels({ base_url: baseUrl, api_key: key || (baseUrl === loadedBaseUrl.value ? undefined : '') })
+    const result = await refreshModels({ base_url: baseUrl, api_key: key || (baseUrl === loadedBaseUrl.value ? undefined : '') }, trackRequest())
     if (!active || sequence !== refreshSequence || baseUrl !== settings.value.base_url.trim() || key !== apiKey.value) return
     models.value = result.models
     if (!models.value.includes(settings.value.model)) settings.value.model = ''
@@ -69,7 +81,7 @@ async function refresh(): Promise<void> {
     if (sequence === refreshSequence) {
       models.value = []
       settings.value.model = ''
-      error.value = cause instanceof Error ? cause.message : '无法获取模型。请检查服务地址和访问密钥。'
+      error.value = messageOf(cause, '无法获取模型。请检查服务地址和访问密钥。')
     }
   } finally {
     if (sequence === refreshSequence) refreshing.value = false
@@ -85,7 +97,7 @@ async function save(): Promise<void> {
   notice.value = ''
   const baseUrl = settings.value.base_url.trim()
   try {
-    const saved = await updateModelSettings({ base_url: baseUrl, api_key: apiKey.value || (baseUrl === loadedBaseUrl.value ? undefined : ''), model: settings.value.model })
+    const saved = await updateModelSettings({ base_url: baseUrl, api_key: apiKey.value || (baseUrl === loadedBaseUrl.value ? undefined : ''), model: settings.value.model }, trackRequest())
     if (!active) return
     settings.value = saved
     loadedBaseUrl.value = saved.base_url
@@ -95,7 +107,7 @@ async function save(): Promise<void> {
     if (saved.model && !models.value.includes(saved.model)) models.value.unshift(saved.model)
     notice.value = '模型设置已保存。'
   } catch (cause) {
-    if (active) error.value = cause instanceof Error ? cause.message : '无法保存模型设置，请检查后重试。'
+    if (active) error.value = messageOf(cause, '无法保存模型设置，请检查后重试。')
   } finally {
     if (active) saving.value = false
   }
@@ -119,7 +131,7 @@ async function cancelApiKeyEdit(): Promise<void> {
 }
 
 onMounted(() => void load())
-onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; emit('busy', false) })
+onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; abortRequests(); emit('busy', false) })
 </script>
 
 <template>

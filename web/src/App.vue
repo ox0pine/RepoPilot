@@ -6,6 +6,7 @@ import AuthView from './views/AuthView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
 import { authenticate } from './api/auth'
 import { onUnauthorized } from './api/client'
+import { messageOf } from './lib/errors'
 import { clearSession, establishSession, sessionToken } from './stores/session'
 import { enterWorkspace, navigate, route, syncRoute } from './router'
 
@@ -30,7 +31,7 @@ async function login(token: string): Promise<void> {
     establishSession(token)
     enterWorkspace()
   } catch (cause) {
-    if (attempt === authAttempt && route.value === '/auth') authError.value = cause instanceof Error ? cause.message : '访问密钥验证失败'
+    if (attempt === authAttempt && route.value === '/auth') authError.value = messageOf(cause, '访问密钥验证失败')
   } finally {
     if (attempt === authAttempt) authLoading.value = false
   }

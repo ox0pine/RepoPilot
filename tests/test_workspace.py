@@ -8,14 +8,12 @@ import shutil
 import stat
 import tarfile
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
+from conftest import real_docker, workspace_fixture_source
 
-from repopilot.domain.context import RepositoryContext
 from repopilot.domain.tasks import SourceSnapshot
 from repopilot.execution import workspace as workspace_module
 from repopilot.execution.git import (
@@ -29,23 +27,10 @@ COMMIT = 'a' * 40
 TOKEN = 'workspace-fixture-secret-not-for-container'
 PRIVATE_KEY = 'workspace-fixture-private-key-not-for-container'
 ROOT = 'example-project-' + COMMIT
-DOCKER_ENABLED = os.environ.get('REPOPILOT_DOCKER_TESTS') == '1'
-real_docker = pytest.mark.skipif(
-    not DOCKER_ENABLED, reason='Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage',
-)
 
 
 def source() -> SourceSnapshot:
-    now = datetime.now(UTC)
-    return SourceSnapshot(
-        repository_url='https://github.com/example/project',
-        baseline_commit=COMMIT, issue_number=7,
-        issue_title='Fix addition', issue_body='Fix calc.py',
-        issue_url='https://github.com/example/project/issues/7',
-        issue_updated_at=now, fetched_at=now,
-        repository_context=RepositoryContext(commit=COMMIT, tree=[], files=[],
-                                             omissions=['Clone fixture is prepared separately'], tree_truncated=False),
-    )
+    return workspace_fixture_source()
 
 
 def member(name: str, content: bytes = b'', *, kind=tarfile.REGTYPE,
@@ -70,7 +55,6 @@ def archive(entries: list[tuple[tarfile.TarInfo, bytes]], *, compressed=True) ->
 
 
 
-@pytest.mark.asyncio
 async def test_fixed_commit_clone_uses_real_local_git_and_preserves_metadata(tmp_path, monkeypatch):
     upstream = tmp_path / 'upstream'
     upstream.mkdir()
@@ -92,13 +76,13 @@ async def test_fixed_commit_clone_uses_real_local_git_and_preserves_metadata(tmp
     async def local_auth(repository_url, credentials, *, strategy):
         home = tmp_path / 'home'
         home.mkdir(exist_ok=True)
-        environment = workspace_module.os.environ.copy()
+        environment = os.environ.copy()
         environment.update({
             'HOME': str(home), 'GIT_CONFIG_NOSYSTEM': '1',
             'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
             'GIT_TERMINAL_PROMPT': '0', 'GIT_ALLOW_PROTOCOL': 'file',
         })
-        yield GitAuthContext(upstream.as_uri(), environment, strategy)
+        yield GitAuthContext(upstream.as_uri(), environment)
 
     monkeypatch.setattr('repopilot.execution.git.github_git_auth', local_auth)
     destination = tmp_path / 'clone'
@@ -112,7 +96,6 @@ async def test_fixed_commit_clone_uses_real_local_git_and_preserves_metadata(tmp
     assert (await command('git', 'config', 'user.name', cwd=destination))[1].strip() == 'RepoPilot'
     assert (await command('git', 'config', 'user.email', cwd=destination))[1].strip() == 'repopilot@users.noreply.github.com'
 
-@pytest.mark.asyncio
 async def test_fixed_commit_clone_rejects_tracked_symlink(tmp_path, monkeypatch):
     upstream = tmp_path / 'symlink-upstream'
     upstream.mkdir()
@@ -132,7 +115,7 @@ async def test_fixed_commit_clone_rejects_tracked_symlink(tmp_path, monkeypatch)
                        'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
                        'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
                        'GIT_TERMINAL_PROMPT': '0', 'GIT_ALLOW_PROTOCOL': 'file'}
-        yield GitAuthContext(upstream.as_uri(), environment, strategy)
+        yield GitAuthContext(upstream.as_uri(), environment)
 
     monkeypatch.setattr('repopilot.execution.git.github_git_auth', local_auth)
     from repopilot.execution.git import GitOperationError
@@ -143,7 +126,6 @@ async def test_fixed_commit_clone_rejects_tracked_symlink(tmp_path, monkeypatch)
         )
 
 
-@pytest.mark.asyncio
 async def test_https_auth_is_ephemeral_and_token_is_not_in_url_or_git_config(tmp_path):
     from repopilot.execution.git import github_git_auth
     credentials = GitHubGitCredentials(api_token=TOKEN, private_key='')
@@ -162,7 +144,6 @@ async def test_https_auth_is_ephemeral_and_token_is_not_in_url_or_git_config(tmp
         assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     assert not token_file.exists()
 
-@pytest.mark.asyncio
 async def test_ssh_auth_uses_pinned_hosts_and_ephemeral_private_key():
     from repopilot.execution.git import github_git_auth
     credentials = GitHubGitCredentials(api_token=TOKEN, private_key=PRIVATE_KEY)
@@ -255,7 +236,6 @@ def test_archive_rejects_malformed_compressed_data(tmp_path):
 
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['list', 'remove', 'still-present'])
 async def test_cleanup_never_claims_success_without_confirmed_container_absence(monkeypatch, failure):
     workspace = Workspace(uuid4())
@@ -283,7 +263,6 @@ async def command(*args: str, cwd: Path | None = None) -> tuple[int, str]:
     return process.returncode, output.decode(errors='replace')
 
 
-@pytest.mark.asyncio
 async def test_patch_applies_binary_new_deleted_mode_and_tracked_ignored_files(tmp_path):
     baseline = tmp_path / 'baseline'
     final = tmp_path / 'final'
@@ -338,7 +317,6 @@ async def test_patch_applies_binary_new_deleted_mode_and_tracked_ignored_files(t
     assert str(final) not in patch
 
 
-@pytest.mark.asyncio
 async def test_patch_limit_never_returns_truncated_applicable_patch(tmp_path, monkeypatch):
     baseline, final = tmp_path / 'baseline', tmp_path / 'final'
     baseline.mkdir()
@@ -349,166 +327,133 @@ async def test_patch_limit_never_returns_truncated_applicable_patch(tmp_path, mo
         await generate_patch(baseline, final)
 
 
-@pytest_asyncio.fixture
-async def docker_workspace(monkeypatch):
-    if not DOCKER_ENABLED:
-        pytest.skip('Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage')
-    assert shutil.which('docker'), 'Docker tests enabled but Docker CLI is unavailable'
-    code, output = await command('docker', 'info', '--format', '{{.ServerVersion}}')
-    assert code == 0, f'Docker tests enabled but Docker daemon is unavailable: {output}'
-    image = os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local')
-    async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
-        destination.mkdir()
-        (destination / '.git').mkdir()
-        (destination / '.git/config').write_text('[core]\nrepositoryformatversion = 0\n')
-        (destination / 'calc.py').write_text('def add(a, b): return a - b\n')
-    monkeypatch.setattr(workspace_module, 'clone_fixed_commit', clone_fixture)
-    workspace = Workspace(uuid4())
-    try:
-        image_id = await workspace.prepare(
-            source=source(),
-            github_credentials=GitHubGitCredentials(api_token=TOKEN, private_key=''),
-            git_auth_strategy='https_token', image=image,
-        )
-        yield workspace, image_id
-    finally:
-        await workspace.cleanup()
-
-
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_source_import_permissions_mounts_and_network(docker_workspace):
-    workspace, image_id = docker_workspace
-    code, output = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
-    assert code == 0, output
-    container = json.loads(output)[0]
-    assert container['Image'] == image_id
-    assert container['Mounts'] == []
-    host = container['HostConfig']
-    assert host['ReadonlyRootfs'] is True
-    assert 'ALL' in [item.upper() for item in host['CapDrop']]
-    assert any(item.startswith('no-new-privileges') for item in host['SecurityOpt'])
-    assert host['NanoCpus'] == 2_000_000_000
-    assert 0 < host['Memory'] <= 4 * 1024**3
-    assert 0 < host['PidsLimit'] <= 512
-    assert host['NetworkMode'] == 'none'
-    assert all('size=' in host['Tmpfs'][path] for path in ('/workspace', '/home/runner', '/tmp'))
-    result = await workspace.shell(
-        "python3 -c 'import os, pathlib; "
-        "assert os.getuid() == 1000; assert os.getgid() == 1000; "
-        "p=pathlib.Path(\"calc.py\"); assert p.stat().st_uid == 1000; "
-        "assert pathlib.Path(\".git/config\").is_file(); "
-        "assert p.read_text() == \"def add(a, b): return a - b\\n\"; "
-        "assert os.environ[\"HOME\"] == \"/home/runner\"; "
-        "assert not pathlib.Path(\"/var/run/docker.sock\").exists(); "
-        "assert not any(\"workspace-fixture-secret\" in v for v in os.environ.values()); "
-        "p.write_text(\"source writable\\n\"); "
-        "pathlib.Path.home().joinpath(\"write-test\").write_text(\"home writable\"); "
-        "pathlib.Path(\"/tmp/write-test\").write_text(\"tmp writable\"); "
-        "print(\"sandbox-ok\")'"
-    )
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == 'sandbox-ok'
-    result = await workspace.shell("python3 -c 'import pathlib; pathlib.Path(\"/root-write-test\").write_text(\"no\")'")
-    assert result.exit_code != 0
-    result = await workspace.shell("python3 -c 'import socket; print(socket.if_nameindex())'")
-    assert result.exit_code == 0, result.output
-    assert "'lo'" in result.output and 'eth' not in result.output
+    async with docker_workspace() as (workspace, image_id):
+        code, output = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
+        assert code == 0, output
+        container = json.loads(output)[0]
+        assert container['Image'] == image_id
+        assert container['Mounts'] == []
+        host = container['HostConfig']
+        assert host['ReadonlyRootfs'] is True
+        assert 'ALL' in [item.upper() for item in host['CapDrop']]
+        assert any(item.startswith('no-new-privileges') for item in host['SecurityOpt'])
+        assert host['NanoCpus'] == 2_000_000_000
+        assert 0 < host['Memory'] <= 4 * 1024**3
+        assert 0 < host['PidsLimit'] <= 512
+        assert host['NetworkMode'] == 'none'
+        assert all('size=' in host['Tmpfs'][path] for path in ('/workspace', '/home/runner', '/tmp'))
+        result = await workspace.shell(
+            "python3 -c 'import os, pathlib; "
+            "assert os.getuid() == 1000; assert os.getgid() == 1000; "
+            "p=pathlib.Path(\"calc.py\"); assert p.stat().st_uid == 1000; "
+            "assert pathlib.Path(\".git/config\").is_file(); "
+            "assert p.read_text() == \"def add(a, b): return a - b\\n\"; "
+            "assert os.environ[\"HOME\"] == \"/home/runner\"; "
+            "assert not pathlib.Path(\"/var/run/docker.sock\").exists(); "
+            "assert not any(\"workspace-fixture-secret\" in v for v in os.environ.values()); "
+            "p.write_text(\"source writable\\n\"); "
+            "pathlib.Path.home().joinpath(\"write-test\").write_text(\"home writable\"); "
+            "pathlib.Path(\"/tmp/write-test\").write_text(\"tmp writable\"); "
+            "print(\"sandbox-ok\")'"
+        )
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == 'sandbox-ok'
+        result = await workspace.shell("python3 -c 'import pathlib; pathlib.Path(\"/root-write-test\").write_text(\"no\")'")
+        assert result.exit_code != 0
+        result = await workspace.shell("python3 -c 'import socket; print(socket.if_nameindex())'")
+        assert result.exit_code == 0, result.output
+        assert "'lo'" in result.output and 'eth' not in result.output
 
 
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_setup_disconnects_before_later_commands(docker_workspace):
-    workspace, _ = docker_workspace
-    await workspace.tool('write_file', {'path': 'pyproject.toml', 'content': '[project]\nname="network-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n'})
-    await workspace.tool('write_file', {'path': 'test_network_fixture.py', 'content': 'import unittest\nclass TestFixture(unittest.TestCase):\n def test_value(self): self.assertEqual(1 + 1, 2)\n'})
-    result = await workspace.setup()
-    assert result.exit_code == 0, result.output
-    code, output = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
-    assert code == 0, output
-    networks = json.loads(output)[0]['NetworkSettings']['Networks']
-    assert 'bridge' not in networks
-    result = await workspace.shell("python3 -c 'import errno,socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ntry: s.connect((\"192.0.2.1\",9))\nexcept OSError as e: assert e.errno == errno.ENETUNREACH\nelse: raise AssertionError(\"external route remains\")\nprint(\"offline\")'")
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == 'offline'
+    async with docker_workspace() as (workspace, _):
+        await workspace.tool('write_file', {'path': 'pyproject.toml', 'content': '[project]\nname="network-fixture"\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies=[]\n[tool.uv]\npackage=false\n'})
+        await workspace.tool('write_file', {'path': 'test_network_fixture.py', 'content': 'import unittest\nclass TestFixture(unittest.TestCase):\n def test_value(self): self.assertEqual(1 + 1, 2)\n'})
+        result = await workspace.setup()
+        assert result.exit_code == 0, result.output
+        code, output = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
+        assert code == 0, output
+        networks = json.loads(output)[0]['NetworkSettings']['Networks']
+        assert 'bridge' not in networks
+        result = await workspace.shell("python3 -c 'import errno,socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ntry: s.connect((\"192.0.2.1\",9))\nexcept OSError as e: assert e.errno == errno.ENETUNREACH\nelse: raise AssertionError(\"external route remains\")\nprint(\"offline\")'")
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == 'offline'
 
 
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_shell_kills_residual_background_group(docker_workspace):
-    workspace, _ = docker_workspace
-    result = await workspace.shell('(sleep 2; echo escaped > /workspace/background-marker) & echo foreground-done')
-    assert result.exit_code == 0, result.output
-    await asyncio.sleep(3)
-    result = await workspace.shell('test ! -e /workspace/background-marker && echo residual-stopped')
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == 'residual-stopped'
+    async with docker_workspace() as (workspace, _):
+        result = await workspace.shell('(sleep 2; echo escaped > /workspace/background-marker) & echo foreground-done')
+        assert result.exit_code == 0, result.output
+        await asyncio.sleep(3)
+        result = await workspace.shell('test ! -e /workspace/background-marker && echo residual-stopped')
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == 'residual-stopped'
 
 
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_shell_timeout_stops_container(docker_workspace):
-    workspace, _ = docker_workspace
-    with pytest.raises(WorkspaceError):
-        await workspace.shell('sleep 120 & wait', timeout=1)
-    await workspace.cleanup()
-    code, _ = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
-    assert code != 0
-
-
-@real_docker
-@pytest.mark.asyncio
-async def test_real_docker_cancel_stops_container_and_its_children(docker_workspace):
-    workspace, _ = docker_workspace
-    shell_task = asyncio.create_task(workspace.shell('sleep 120 & echo ready > /workspace/cancel-ready; wait'))
-    try:
-        # Observe actual command startup rather than assuming scheduling completed.
-        for _ in range(50):
-            code, output = await command('docker', 'top', f'repopilot-run-{workspace.run_id}', '-eo', 'pid,args')
-            if code == 0 and any(row.split(maxsplit=1)[-1] == 'sleep 120' for row in output.splitlines()[1:]):
-                break
-            await asyncio.sleep(0.1)
-        else:
-            pytest.fail('The cancellation command did not start')
-        code, output = await command('docker', 'top', f'repopilot-run-{workspace.run_id}')
-        assert code == 0 and 'sleep 120' in output, output
-        shell_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await shell_task
+    async with docker_workspace() as (workspace, _):
+        with pytest.raises(WorkspaceError):
+            await workspace.shell('sleep 120 & wait', timeout=1)
         await workspace.cleanup()
         code, _ = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
         assert code != 0
-        # Cleanup remains idempotent only once Docker confirms absence.
-        await workspace.cleanup()
-    finally:
-        if not shell_task.done():
+
+
+@real_docker
+async def test_real_docker_cancel_stops_container_and_its_children(docker_workspace):
+    async with docker_workspace() as (workspace, _):
+        shell_task = asyncio.create_task(workspace.shell('sleep 120 & echo ready > /workspace/cancel-ready; wait'))
+        try:
+            # Observe actual command startup rather than assuming scheduling completed.
+            for _ in range(50):
+                code, output = await command('docker', 'top', f'repopilot-run-{workspace.run_id}', '-eo', 'pid,args')
+                if code == 0 and any(row.split(maxsplit=1)[-1] == 'sleep 120' for row in output.splitlines()[1:]):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail('The cancellation command did not start')
+            code, output = await command('docker', 'top', f'repopilot-run-{workspace.run_id}')
+            assert code == 0 and 'sleep 120' in output, output
             shell_task.cancel()
-            await asyncio.gather(shell_task, return_exceptions=True)
+            with pytest.raises(asyncio.CancelledError):
+                await shell_task
+            await workspace.cleanup()
+            code, _ = await command('docker', 'inspect', f'repopilot-run-{workspace.run_id}')
+            assert code != 0
+            # Cleanup remains idempotent only once Docker confirms absence.
+            await workspace.cleanup()
+        finally:
+            if not shell_task.done():
+                shell_task.cancel()
+                await asyncio.gather(shell_task, return_exceptions=True)
 
 
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_capture_patch_uses_external_baseline(tmp_path, docker_workspace):
-    workspace, _ = docker_workspace
-    result = await workspace.shell("printf 'def add(a, b): return a + b\\n' > calc.py; mkdir -p node_modules; printf 'cache' > node_modules/cache")
-    assert result.exit_code == 0, result.output
-    patch = await workspace.capture()
-    assert '.git/' not in patch
-    baseline = tmp_path / 'fresh'
-    baseline.mkdir()
-    (baseline / 'calc.py').write_text('def add(a, b): return a - b\n')
-    patch_file = tmp_path / 'result.patch'
-    patch_file.write_text(patch)
-    code, output = await command('git', 'apply', '--binary', str(patch_file), cwd=baseline)
-    assert code == 0, output
-    assert (baseline / 'calc.py').read_text() == 'def add(a, b): return a + b\n'
-    assert not (baseline / 'node_modules').exists()
-    with pytest.raises(WorkspaceError):
-        await workspace.shell('echo cannot-run-after-capture')
+    async with docker_workspace() as (workspace, _):
+        result = await workspace.shell("printf 'def add(a, b): return a + b\\n' > calc.py; mkdir -p node_modules; printf 'cache' > node_modules/cache")
+        assert result.exit_code == 0, result.output
+        patch = await workspace.capture()
+        assert '.git/' not in patch
+        baseline = tmp_path / 'fresh'
+        baseline.mkdir()
+        (baseline / 'calc.py').write_text('def add(a, b): return a - b\n')
+        patch_file = tmp_path / 'result.patch'
+        patch_file.write_text(patch)
+        code, output = await command('git', 'apply', '--binary', str(patch_file), cwd=baseline)
+        assert code == 0, output
+        assert (baseline / 'calc.py').read_text() == 'def add(a, b): return a + b\n'
+        assert not (baseline / 'node_modules').exists()
+        with pytest.raises(WorkspaceError):
+            await workspace.shell('echo cannot-run-after-capture')
 
 
 @real_docker
-@pytest.mark.asyncio
 async def test_real_docker_missing_image_is_blocked_without_pull_or_container():
     assert shutil.which('docker'), 'Docker tests enabled but Docker CLI is unavailable'
     workspace = Workspace(uuid4())

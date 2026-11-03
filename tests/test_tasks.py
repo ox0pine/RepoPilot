@@ -1,67 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
+from factories import make_goal, make_source, ready
 from sqlalchemy import text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from repopilot.domain.context import RepositoryContext
-from repopilot.domain.tasks import GoalContent, SourceSnapshot, TaskError
-from repopilot.persistence.database import Database, TaskRow
+from repopilot.domain.tasks import TaskError
+from repopilot.persistence.database import TaskRow
 from repopilot.persistence.tasks import TaskRepository
-
-
-@pytest_asyncio.fixture
-async def database():
-    url = os.environ.get('TEST_DATABASE_URL')
-    if not url:
-        pytest.skip('TEST_DATABASE_URL must point to a dedicated test PostgreSQL')
-    schema = 'task_test_' + uuid4().hex
-    admin = create_async_engine(url, hide_parameters=True)
-    async with admin.begin() as connection:
-        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    database = Database.__new__(Database)
-    database.engine = create_async_engine(url, hide_parameters=True, connect_args={'server_settings': {'search_path': schema}})
-    database.sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    try:
-        await database.initialize()
-        yield database
-    finally:
-        await database.close()
-        async with admin.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        await admin.dispose()
-
-
-def source(number=1):
-    return SourceSnapshot(repository_url='https://github.com/example/repo', baseline_commit='a' * 40,
-                          issue_number=number, issue_title=f'Issue {number}', issue_body='Fixed snapshot',
-                          issue_url=f'https://github.com/example/repo/issues/{number}',
-                          issue_updated_at=datetime.now(timezone.utc), fetched_at=datetime.now(timezone.utc),
-                          repository_context=RepositoryContext(commit='a' * 40, tree=[], files=[],
-                                                               omissions=['Fixture contains no source files'], tree_truncated=False))
-
-
-def goal(summary='解决问题'):
-    return GoalContent(summary=summary, scope=['修复 Issue'], non_goals=[], acceptance_criteria=['复现问题后验证修复'], plan=['分析来源'], open_questions=[])
-
-
-async def ready(repo, task):
-    attempt = await repo.start_generation(task.id, task.revision, 'generate')
-    return await repo.complete_generation(task.id, attempt.generation_id, goal(), 'test-model')
 
 
 async def test_version_approval_revocation_and_persistence(database):
     repo = TaskRepository(database)
-    task = await ready(repo, await repo.create(source()))
+    task = await ready(repo, await repo.create(make_source()))
     attempt = await repo.start_generation(task.id, task.revision, 'revise', '仅修复 Issue')
-    task = await repo.complete_generation(task.id, attempt.generation_id, goal('收窄范围'), 'test-model')
+    task = await repo.complete_generation(task.id, attempt.generation_id, make_goal(summary='收窄范围'), 'test-model')
     with pytest.raises(TaskError) as stale:
         await repo.approve(task.id, task.revision, 1)
     assert stale.value.status_code == 409
@@ -78,7 +34,7 @@ async def test_version_approval_revocation_and_persistence(database):
     assert rejected.value.status_code == 409
     retry = await repo.start_generation(task.id, failed.revision, 'retry')
     assert retry.feedback == '不升级依赖'
-    task = await repo.complete_generation(task.id, retry.generation_id, goal('不升级依赖'), 'test-model')
+    task = await repo.complete_generation(task.id, retry.generation_id, make_goal(summary='不升级依赖'), 'test-model')
     restored = await TaskRepository(database).detail(task.id)
     assert restored.source_snapshot.issue_body == 'Fixed snapshot'
     assert [g.content.summary for g in restored.goals] == ['解决问题', '收窄范围', '不升级依赖']
@@ -88,7 +44,7 @@ async def test_version_approval_revocation_and_persistence(database):
 
 async def test_single_generation_and_expired_result_cannot_overwrite(database):
     repo = TaskRepository(database)
-    task = await repo.create(source())
+    task = await repo.create(make_source())
     results = await asyncio.gather(repo.start_generation(task.id, 1, 'generate'), repo.start_generation(task.id, 1, 'generate'), return_exceptions=True)
     attempts = [r for r in results if not isinstance(r, Exception)]
     errors = [r for r in results if isinstance(r, TaskError)]
@@ -101,18 +57,18 @@ async def test_single_generation_and_expired_result_cannot_overwrite(database):
     expired = await repo.detail(task.id)
     assert expired.status == 'generation_failed' and expired.last_error == '目标生成已中断，请重试'
     fresh = await repo.start_generation(task.id, expired.revision, 'retry')
-    assert await repo.complete_generation(task.id, attempts[0].generation_id, goal('迟到内容'), 'test') is None
+    assert await repo.complete_generation(task.id, attempts[0].generation_id, make_goal(summary='迟到内容'), 'test') is None
     assert await repo.fail_generation(task.id, attempts[0].generation_id, '迟到错误') is None
-    completed = await repo.complete_generation(task.id, fresh.generation_id, goal('有效内容'), 'test')
+    completed = await repo.complete_generation(task.id, fresh.generation_id, make_goal(summary='有效内容'), 'test')
     assert completed.current_goal_version == 1 and completed.goals[0].content.summary == '有效内容'
 
 
 async def test_statistics_and_stable_keyset_pagination(database):
     repo = TaskRepository(database)
     assert (await repo.stats()).model_dump() == dict(total=0, draft=0, generating=0, awaiting_approval=0, approved=0, generation_failed=0)
-    tasks = [await repo.create(source(i + 1)) for i in range(12)]
+    tasks = [await repo.create(make_source(i + 1)) for i in range(12)]
     async with database.session() as session, session.begin():
-        await session.execute(update(TaskRow).values(updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+        await session.execute(update(TaskRow).values(updated_at=datetime(2026, 1, 1, tzinfo=UTC)))
     first = await repo.list(5)
     second = await repo.list(5, first.next_cursor)
     third = await repo.list(5, second.next_cursor)
@@ -135,7 +91,7 @@ async def test_statistics_and_stable_keyset_pagination(database):
 
 async def test_list_filters_by_status(database):
     repo = TaskRepository(database)
-    tasks = [await repo.create(source(i + 1)) for i in range(5)]
+    tasks = [await repo.create(make_source(i + 1)) for i in range(5)]
     awaiting = await ready(repo, tasks[0])
     generation = await repo.start_generation(tasks[1].id, 1, 'generate')
     await repo.fail_generation(tasks[1].id, generation.generation_id, '安全错误')
@@ -174,74 +130,12 @@ async def test_list_filters_by_status(database):
 ])
 def test_invalid_source_input(field, value):
     from pydantic import ValidationError
+
     from repopilot.domain.tasks import CreateTask
     payload = dict(repository_url='https://github.com/example/repo', baseline_commit='a' * 40, issue_url='https://github.com/example/repo/issues/1')
     payload[field] = value
     with pytest.raises(ValidationError):
         CreateTask(**payload)
-
-
-@pytest_asyncio.fixture
-async def api_client(database, monkeypatch):
-    import httpx
-    from cryptography.fernet import Fernet
-    from pydantic import SecretStr
-    import repopilot.api.app as app_module
-    from repopilot.config import AppSettings
-    from repopilot.integration.task_sources import GitHubSourceClient
-    from repopilot.integration.goals import GoalClient
-    from repopilot.persistence.database import ModelSettingsRow, GitHubSettingsRow
-    redis_url = os.environ.get('TEST_REDIS_URL')
-    if not redis_url:
-        pytest.skip('TEST_REDIS_URL must point to a dedicated test Redis')
-    key = Fernet.generate_key()
-    async with database.session() as session, session.begin():
-        model = await session.get(ModelSettingsRow, 1)
-        model.model = 'test-model'
-        model.api_key = 'provider-secret-marker'
-        github = await session.get(GitHubSettingsRow, 1)
-        github.api_token_ciphertext = Fernet(key).encrypt(b'github-secret-marker').decode()
-    calls = []
-    controls = {'source_status': 200, 'model_status': 200, 'body': 'Snapshot body',
-                'context_status': 200, 'bad_blob': False, 'invalid_tree': False}
-    def source_transport(request):
-        calls.append(str(request.url))
-        if controls['source_status'] != 200:
-            return httpx.Response(controls['source_status'], text='github-secret-marker')
-        if '/commits/' in request.url.path:
-            return httpx.Response(200, json={'sha':'a' * 40})
-        content = b'# Fixture repository\n'
-        blob_sha = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-        if '/git/' in request.url.path and controls['context_status'] != 200:
-            return httpx.Response(controls['context_status'], text='github-secret-marker')
-        if '/git/trees/' in request.url.path:
-            if controls['invalid_tree']:
-                return httpx.Response(200, json={'tree': 'invalid'})
-            return httpx.Response(200, json={
-                'sha': 'b' * 40, 'truncated': False,
-                'tree': [{'path': 'README.md', 'type': 'blob', 'mode': '100644',
-                          'sha': blob_sha, 'size': len(content)}],
-            })
-        if '/git/blobs/' in request.url.path:
-            return httpx.Response(200, content=b'wrong hash' if controls['bad_blob'] else content)
-        return httpx.Response(200, json={'number':1, 'title':'Example issue', 'body':controls['body'], 'html_url':'https://github.com/example/repo/issues/1', 'updated_at':'2026-01-01T00:00:00Z'})
-    def model_transport(request):
-        import json
-        calls.append(str(request.url))
-        if controls['model_status'] != 200:
-            return httpx.Response(controls['model_status'], text='provider-secret-marker')
-        payload = json.loads(request.content)
-        content = goal('模型实际输出').model_dump()
-        if '不要升级依赖' in payload['messages'][-1]['content']:
-            content['non_goals'] = ['依赖升级']
-        return httpx.Response(200, json={'choices':[{'message':{'content':json.dumps(content, ensure_ascii=False)}}]})
-    monkeypatch.setattr(app_module, 'Database', lambda _: database)
-    monkeypatch.setattr(app_module, 'GitHubSourceClient', lambda: GitHubSourceClient(transport=httpx.MockTransport(source_transport)))
-    monkeypatch.setattr(app_module, 'GoalClient', lambda: GoalClient(transport=httpx.MockTransport(model_transport)))
-    runtime = AppSettings(_env_file=None, api_token=SecretStr('workbench-test'), github_credentials_key=SecretStr(key.decode()), database_url=os.environ['TEST_DATABASE_URL'], redis_url=redis_url)
-    app = app_module.create_app(runtime)
-    async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test', headers={'Authorization':'Bearer workbench-test'}) as client:
-        yield client, calls, controls
 
 
 async def test_api_list_filters_by_status(api_client):
@@ -324,12 +218,13 @@ async def test_missing_github_and_model_are_actionable(api_client, database):
 
 async def test_cancelled_service_attempt_is_persisted_as_failed(database):
     import httpx
+
     from repopilot.application.tasks import TaskService
     from repopilot.domain.tasks import GenerateGoalRequest
     from repopilot.integration.goals import GoalClient
     from repopilot.integration.task_sources import GitHubSourceClient
-    from repopilot.persistence.settings import SettingsRepository, GitHubSettingsRepository
     from repopilot.persistence.database import ModelSettingsRow
+    from repopilot.persistence.settings import GitHubSettingsRepository, SettingsRepository
     async with database.session() as session, session.begin():
         model = await session.get(ModelSettingsRow, 1)
         model.model = 'cancel-model'
@@ -338,7 +233,7 @@ async def test_cancelled_service_attempt_is_persisted_as_failed(database):
         entered.set()
         await asyncio.Event().wait()
     repo = TaskRepository(database)
-    task = await repo.create(source())
+    task = await repo.create(make_source())
     service = TaskService(repo, SettingsRepository(database), GitHubSettingsRepository(database, None), GitHubSourceClient(), GoalClient(transport=httpx.MockTransport(transport)))
     pending = asyncio.create_task(service.generate(task.id, GenerateGoalRequest(expected_revision=1, action='generate')))
     await asyncio.wait_for(entered.wait(), 2)

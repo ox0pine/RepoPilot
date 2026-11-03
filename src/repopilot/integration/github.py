@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 
 from repopilot.domain.settings import GitHubPublicKeyResult
+from repopilot.integration import github_http
 
 
 class GitHubAPIError(Exception):
@@ -65,17 +66,8 @@ class GitHubClient:
             page += 1
 
     async def register_public_key(self, *, public_key: str, api_token: str) -> GitHubPublicKeyResult:
-        headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2026-03-10",
-            "User-Agent": "RepoPilot",
-        }
         try:
-            async with httpx.AsyncClient(
-                base_url="https://api.github.com", timeout=15.0,
-                follow_redirects=False, trust_env=False, transport=self.transport, headers=headers,
-            ) as client:
+            async with github_http.client(self.transport, timeout=15.0, token=api_token) as client:
                 key_id = await self._find(client, public_key)
                 if key_id is not None:
                     return GitHubPublicKeyResult(status="already_exists", key_id=key_id, public_key=public_key)

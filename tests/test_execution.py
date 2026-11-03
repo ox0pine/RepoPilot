@@ -9,9 +9,10 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from conftest import real_docker
+from factories import make_source
 from test_workspace import TOKEN as GITHUB_TOKEN
-from test_workspace import command, real_docker, source
-from test_workspace import docker_workspace as docker_workspace
+from test_workspace import command
 
 from repopilot.domain.tasks import GoalContent
 from repopilot.execution import container_helper
@@ -24,7 +25,6 @@ from repopilot.execution.tools import ToolDispatcher, validate_batch
 from repopilot.execution.workspace import CommandResult, ToolError, WorkspaceError
 from repopilot.persistence.settings import StoredModelSettings
 
-pytestmark = pytest.mark.asyncio
 MODEL_TOKEN = 'execution-provider-secret-not-for-model-input'
 CHECK = "python -c 'from calc import add; assert add(2, 3) == 5'"
 GOAL = GoalContent(
@@ -133,18 +133,34 @@ def workspace_fixture(monkeypatch):
     return IsolatedWorkspace
 
 
-async def run_engine(provider, emit=None, **overrides):
-    events = []
-    async def record(kind, payload):
-        events.append((kind, payload))
+class RecordingSink:
+    def __init__(self, fail_on=None):
+        self.events = []
+        self.metadata_calls = []
+        self.fail_on = fail_on
+
+    async def event(self, kind, payload):
+        if kind == self.fail_on:
+            raise OSError('database unavailable')
+        self.events.append((kind, payload))
+
+    async def metadata(self, **fields):
+        self.metadata_calls.append(fields)
+
+
+DISCARD_SINK = RecordingSink()
+
+
+async def run_engine(provider, sink=None, **overrides):
+    sink = sink or RecordingSink()
     parameters = dict(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        run_id=uuid4(), source=make_source(), goal=GOAL, model=settings(),
         github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
-        git_auth_strategy='https_token', image='repopilot-dev:local', emit=emit or record,
+        git_auth_strategy='https_token', image='repopilot-dev:local', sink=sink,
     )
     parameters.update(overrides)
     result = await ExecutionEngine(model_transport=provider.transport).run(**parameters)
-    return result, events
+    return result, sink.events
 
 
 @pytest.mark.parametrize('response', [
@@ -245,12 +261,9 @@ async def test_failed_final_check_cannot_reset_round_budget(workspace_fixture, m
 
 
 async def test_event_failure_prevents_tool_side_effect_and_cleans_up(workspace_fixture):
-    async def failing_emit(kind, payload):
-        if kind == 'tool_start':
-            raise OSError('database unavailable')
     provider = Provider([reply(call())])
     with pytest.raises(Exception, match='database unavailable|事件|日志'):
-        await run_engine(provider, emit=failing_emit)
+        await run_engine(provider, sink=RecordingSink(fail_on='tool_start'))
     workspace = workspace_fixture.instances[-1]
     assert workspace.actions == []
     assert workspace.cleaned
@@ -281,17 +294,13 @@ async def test_wall_clock_budget_stops_waiting_model_and_cleans_up(workspace_fix
         return reply(call())
     monkeypatch.setattr(engine_module, 'MAX_RUN_SECONDS', 0.01)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(waiting_response)).run(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        run_id=uuid4(), source=make_source(), goal=GOAL, model=settings(),
         github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
-        git_auth_strategy='https_token', image='repopilot-dev:local', emit=_discard,
+        git_auth_strategy='https_token', image='repopilot-dev:local', sink=DISCARD_SINK,
     )
     assert result.status == 'exhausted'
     assert workspace_fixture.instances[-1].actions == []
     assert workspace_fixture.instances[-1].cleaned
-
-
-async def _discard(kind, payload):
-    pass
 
 
 async def test_failed_run_preserves_existing_patch_and_visible_failure(workspace_fixture):
@@ -358,9 +367,9 @@ async def test_unknown_network_result_is_not_retried(workspace_fixture):
         requests.append(request)
         raise httpx.ReadError('Connection lost after submission', request=request)
     result = await ExecutionEngine(model_transport=httpx.MockTransport(disconnected)).run(
-        run_id=uuid4(), source=source(), goal=GOAL, model=settings(),
+        run_id=uuid4(), source=make_source(), goal=GOAL, model=settings(),
         github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
-        git_auth_strategy='https_token', image='repopilot-dev:local', emit=_discard,
+        git_auth_strategy='https_token', image='repopilot-dev:local', sink=DISCARD_SINK,
     )
     assert result.status == 'failed'
     assert '未自动重试' in result.report
@@ -409,25 +418,45 @@ async def test_no_diff_completion_explicitly_reports_no_changes(workspace_fixtur
 
 
 @real_docker
+async def test_dot_prefixed_read_allows_same_file_edit(docker_workspace):
+    async with docker_workspace() as (workspace, _):
+        dispatcher = ToolDispatcher(workspace)
+        def validated(call_id, name, arguments):
+            return validate_batch([call(call_id, name, arguments)], set())[0]
+        read_call = validated('read', 'read_file', {'path': './calc.py'})
+        # One file has one identity: the dot prefix is folded at validation.
+        assert read_call.arguments['path'] == 'calc.py'
+        read = await dispatcher.execute(read_call)
+        assert read.get('ok') is not False and not read.get('error'), read
+        edit = await dispatcher.execute(validated('edit', 'edit_file', {
+            'path': 'calc.py', 'expected_sha256': read['sha256'],
+            'old_text': 'return a - b', 'new_text': 'return a + b',
+        }))
+        assert edit.get('ok') is not False and not edit.get('error'), edit
+        content = await dispatcher.execute(validated('reread', 'read_file', {'path': 'calc.py'}))
+        assert 'return a + b' in content['content']
+
+
+@real_docker
 async def test_actual_docker_rejects_stale_sha_after_shell_and_keeps_new_content(docker_workspace):
-    workspace, _ = docker_workspace
-    dispatcher = ToolDispatcher(workspace)
-    def validated(call_id, name, arguments):
-        return validate_batch([call(call_id, name, arguments)], set())[0]
-    read = await dispatcher.execute(validated('read', 'read_file', {'path': 'calc.py'}))
-    old_sha = read['sha256']
-    shell = await dispatcher.execute(validated('shell', 'shell', {
-        'command': "printf 'def add(a, b): return a * b\\n' > calc.py",
-    }))
-    assert shell['exit_code'] == 0
-    failure = await dispatcher.execute(validated('stale', 'edit_file', {
-        'path': 'calc.py', 'expected_sha256': old_sha,
-        'old_text': 'return a - b', 'new_text': 'return a + b',
-    }))
-    assert failure.get('error') or failure.get('ok') is False
-    reread = await dispatcher.execute(validated('reread', 'read_file', {'path': 'calc.py'}))
-    assert 'return a * b' in reread['content']
-    assert reread['sha256'] != old_sha
+    async with docker_workspace() as (workspace, _):
+        dispatcher = ToolDispatcher(workspace)
+        def validated(call_id, name, arguments):
+            return validate_batch([call(call_id, name, arguments)], set())[0]
+        read = await dispatcher.execute(validated('read', 'read_file', {'path': 'calc.py'}))
+        old_sha = read['sha256']
+        shell = await dispatcher.execute(validated('shell', 'shell', {
+            'command': "printf 'def add(a, b): return a * b\\n' > calc.py",
+        }))
+        assert shell['exit_code'] == 0
+        failure = await dispatcher.execute(validated('stale', 'edit_file', {
+            'path': 'calc.py', 'expected_sha256': old_sha,
+            'old_text': 'return a - b', 'new_text': 'return a + b',
+        }))
+        assert failure.get('error') or failure.get('ok') is False
+        reread = await dispatcher.execute(validated('reread', 'read_file', {'path': 'calc.py'}))
+        assert 'return a * b' in reread['content']
+        assert reread['sha256'] != old_sha
 
 
 @real_docker
@@ -457,17 +486,15 @@ async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_re
     async def local_clone(repository_url, commit, destination, credentials, *, strategy, timeout=90):
         shutil.copytree(upstream, destination)
     monkeypatch.setattr(workspace_module, 'clone_fixed_commit', local_clone)
-    events = []
-    async def emit(kind, payload):
-        events.append((kind, payload))
+    sink = RecordingSink()
     run_id = uuid4()
     engine = ExecutionEngine(model_transport=provider.transport)
     try:
         result = await engine.run(
-            run_id=run_id, source=source(), goal=GOAL, model=settings(),
+            run_id=run_id, source=make_source(), goal=GOAL, model=settings(),
             github_credentials=GitHubGitCredentials(api_token=GITHUB_TOKEN, private_key=''),
             git_auth_strategy='https_token',
-            image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'), emit=emit,
+            image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'), sink=sink,
         )
         assert result.status == 'completed', result.report
         assert [(check.phase, check.exit_code) for check in result.checks] == [('setup', 0), ('baseline', 1), ('final', 0)]
@@ -484,10 +511,10 @@ async def test_actual_engine_reads_edits_checks_captures_applicable_patch_and_re
         assert code == 0, output
         code, _ = await command('docker', 'inspect', f'repopilot-run-{run_id}')
         assert code != 0, 'Container must be gone before completion is returned'
-        starts = [payload['call_id'] for kind, payload in events if kind == 'tool_start']
-        results = [payload['call_id'] for kind, payload in events if kind == 'tool_result']
+        starts = [payload['call_id'] for kind, payload in sink.events if kind == 'tool_start']
+        results = [payload['call_id'] for kind, payload in sink.events if kind == 'tool_result']
         assert starts == results == ['read', 'edit']
-        saved = json.dumps(events, ensure_ascii=False) + result.report + result.patch
+        saved = json.dumps(sink.events, ensure_ascii=False) + result.report + result.patch
         assert MODEL_TOKEN not in saved and GITHUB_TOKEN not in saved
     finally:
         await engine.cleanup(run_id)

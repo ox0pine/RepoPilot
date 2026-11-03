@@ -4,9 +4,7 @@ import asyncio
 import gzip
 import io
 import json
-import os
 import shutil
-import signal
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -18,13 +16,16 @@ from repopilot.execution.git import (
     GitAuthStrategy,
     GitHubGitCredentials,
     GitOperationError,
+    base_git_environment,
     clone_fixed_commit,
 )
+from repopilot.execution.paths import relative_path
+from repopilot.execution.process import OutputLimitExceeded, run_command
+from repopilot.repo_policy import IGNORED_DIRECTORIES
 
 MAX_EXPANDED = 200 * 1024 * 1024
 MAX_MEMBERS = 20_000
 MAX_PATCH = 8 * 1024 * 1024
-FIXED_IGNORES = {'.git', 'node_modules', '.venv', '__pycache__', 'dist', 'build'}
 
 
 class WorkspaceError(Exception):
@@ -48,51 +49,12 @@ async def _process(args: list[str], *, data: bytes | None = None, timeout: float
                    limit: int = 1024 * 1024, cwd: Path | None = None,
                    env: dict[str, str] | None = None) -> tuple[int, bytes, bytes]:
     try:
-        proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
-                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                                   cwd=cwd, env=env, start_new_session=True)
+        return await run_command(args, data=data, timeout=timeout, limit=limit, cwd=cwd, env=env)
+    except OutputLimitExceeded:
+        raise WorkspaceError('执行输出超过安全上限') from None
     except OSError:
         raise WorkspaceError('执行环境缺少所需命令') from None
 
-    async def collect(stream: asyncio.StreamReader) -> bytes:
-        chunks = bytearray()
-        while chunk := await stream.read(65536):
-            if len(chunks) + len(chunk) > limit:
-                raise WorkspaceError('执行输出超过安全上限')
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-    async def send() -> None:
-        if proc.stdin is not None:
-            try:
-                proc.stdin.write(data or b'')
-                await proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            finally:
-                proc.stdin.close()
-                try:
-                    await proc.stdin.wait_closed()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-
-    tasks = [asyncio.create_task(collect(proc.stdout)), asyncio.create_task(collect(proc.stderr)),
-             asyncio.create_task(send()), asyncio.create_task(proc.wait())]
-    try:
-        async with asyncio.timeout(timeout):
-            values = await asyncio.gather(*tasks)
-        return proc.returncode, values[0], values[1]
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        if proc.returncode is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        await proc.wait()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
 
 class _ArchiveReader:
     def __init__(self, data: bytes) -> None:
@@ -208,9 +170,7 @@ async def generate_patch(baseline: Path, final: Path) -> str:
         ignore.mkdir()
         if (before / '.gitignore').is_file():
             shutil.copyfile(before / '.gitignore', ignore / '.gitignore')
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(root), 'LC_ALL': 'C',
-               'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
-               'GIT_ATTR_NOSYSTEM': '1'}
+        env = base_git_environment(root)
         rc, _, _ = await _process(['git', 'init', '--quiet', str(ignore)], env=env)
         if rc:
             raise WorkspaceError('无法准备可信差异环境')
@@ -222,7 +182,7 @@ async def generate_patch(baseline: Path, final: Path) -> str:
                 raise WorkspaceError('无法读取基准忽略规则')
             ignored = {v.decode() for v in out.split(b'\0') if v}
         for name in candidates:
-            if name in ignored or any(part in FIXED_IGNORES for part in PurePosixPath(name).parts):
+            if name in ignored or any(part in IGNORED_DIRECTORIES for part in PurePosixPath(name).parts):
                 (after / name).unlink()
         try:
             rc, out, _ = await _process(['git', '-c', 'core.attributesFile=/dev/null', '-c', 'core.fileMode=true',
@@ -244,7 +204,6 @@ class Workspace:
     def __init__(self, run_id: UUID) -> None:
         self.run_id = UUID(str(run_id))
         self.container_name = f'repopilot-run-{self.run_id}'
-        self.image_id: str | None = None
         self.prepared = False
         self._frozen = False
         self._captured = False
@@ -252,7 +211,6 @@ class Workspace:
         self.baseline: Path | None = None
         self.final: Path | None = None
         self._lock = asyncio.Lock()
-        self._reads: dict[str, str] = {}
         self._lsp_manager = None
         self._environment: dict = {'projects': [], 'ready': True}
 
@@ -276,7 +234,6 @@ class Workspace:
             int(image_id[7:], 16)
         except (ValueError, KeyError, TypeError):
             raise WorkspaceError('执行镜像标识无效', blocked=True) from None
-        self.image_id = image_id
         self._temporary = tempfile.TemporaryDirectory(prefix=f'repopilot-{self.run_id}-')
         self.baseline = Path(self._temporary.name) / 'baseline'
         self.final = Path(self._temporary.name) / 'final'
@@ -384,8 +341,10 @@ class Workspace:
                 raise WorkspaceError('Language-server protocol failed; execution container was stopped') from None
 
     def _shell_environment(self, cwd: str, project: str | None) -> tuple[str, dict]:
-        if not isinstance(cwd, str) or not cwd or '\x00' in cwd or cwd.startswith('/') or any(part in {'', '..'} for part in cwd.split('/')):
-            raise ToolError('Shell cwd must be a safe relative workspace directory')
+        try:
+            cwd = relative_path(cwd, allow_dot=True)
+        except ValueError:
+            raise ToolError('Shell cwd must be a safe relative workspace directory') from None
         directory = PurePosixPath(cwd)
         profiles = self._environment['projects']
         if project is not None:
@@ -443,6 +402,15 @@ class Workspace:
             self._environment.update({'ready': False, 'blocked_reason': 'Automatic environment preparation exceeded 300 seconds', 'check_command': ''})
             raise WorkspaceError('Automatic environment preparation exceeded 300 seconds', blocked=True) from None
 
+    def _ensure_environment_ready(self) -> None:
+        if self._environment['ready']:
+            return
+        blocked = [project for project in self._environment['projects'] if not project['ready']]
+        reason = '; '.join(
+            project['root'] + ': ' + project['blocked_reason'] for project in blocked
+        ) or self._environment.get('blocked_reason', 'Automatic environment preparation failed')
+        raise WorkspaceError(reason, blocked=True)
+
     async def _setup(self) -> CommandResult:
         async with self._lock:
             await self._close_lsp()
@@ -463,30 +431,21 @@ class Workspace:
                 networks = json.loads(out)
                 if rc or not isinstance(networks, dict) or any(name != 'none' for name in networks):
                     raise WorkspaceError('无法确认执行容器已隔离网络')
-                if not self._environment['ready']:
-                    blocked = [p for p in self._environment['projects'] if not p['ready']]
-                    reason = '; '.join(p['root'] + ': ' + p['blocked_reason'] for p in blocked) or self._environment.get('blocked_reason', 'Automatic environment preparation failed')
-                    raise WorkspaceError(reason, blocked=True)
+                self._ensure_environment_ready()
                 await self._prepare_environments(network=False, verify=True)
-                blocked = [p for p in self._environment['projects'] if not p['ready']]
-                if not self._environment['ready']:
-                    reason = '; '.join(p['root'] + ': ' + p['blocked_reason'] for p in blocked) or self._environment.get('blocked_reason', 'Automatic environment preparation failed')
-                    raise WorkspaceError(reason, blocked=True)
+                self._ensure_environment_ready()
                 return CommandResult(0, json.dumps(self._environment, ensure_ascii=False), False)
             except BaseException:
                 await asyncio.shield(self.cleanup())
                 raise
 
     async def tool(self, name: str, arguments: dict) -> dict:
+        # The container compares the whole-file sha256 under the file lock; that
+        # check is authoritative, so the host keeps no second copy of it.
         if name not in {'read_file', 'search', 'edit_file', 'write_file'}:
             raise ToolError('Unknown workspace tool')
         async with self._lock:
-            if name == 'edit_file' and self._reads.get(arguments.get('path')) != arguments.get('expected_sha256'):
-                raise ToolError('必须先读取文件并使用其最新 hash')
-            result = await self._helper(name, arguments)
-            if name in {'read_file', 'edit_file'}:
-                self._reads[arguments['path']] = result['sha256']
-            return result
+            return await self._helper(name, arguments)
 
     async def capture(self) -> str:
         async with self._lock:

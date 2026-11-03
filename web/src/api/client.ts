@@ -7,10 +7,35 @@ export function onUnauthorized(handler: () => void): void {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly fields: Record<string, string> = {},
+  ) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+// 422 bodies carry a per-field list; a request must be able to fill the form back.
+function detailOf(payload: unknown): { message: string; fields: Record<string, string> } {
+  if (typeof payload === 'object' && payload !== null && 'detail' in payload) {
+    const detail = payload.detail
+    if (typeof detail === 'string' && detail) return { message: detail, fields: {} }
+    if (Array.isArray(detail)) {
+      const fields: Record<string, string> = {}
+      let message = ''
+      for (const entry of detail as Array<{ loc?: unknown; msg?: unknown }>) {
+        if (typeof entry?.msg !== 'string' || !entry.msg) continue
+        message ||= entry.msg
+        const loc = Array.isArray(entry.loc) ? entry.loc.filter(part => part !== 'body') : []
+        const key = loc.length ? String(loc[loc.length - 1]) : ''
+        if (key && !fields[key]) fields[key] = entry.msg
+      }
+      return { message: message || '请求失败', fields }
+    }
+  }
+  return { message: '请求失败', fields: {} }
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -28,8 +53,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     unauthorizedHandler?.()
   }
   if (!response.ok) {
-    const detail = typeof payload === 'object' && payload !== null && 'detail' in payload && typeof payload.detail === 'string' ? payload.detail : '请求失败'
-    throw new ApiError(detail, response.status)
+    const { message, fields } = detailOf(payload)
+    throw new ApiError(message, response.status, fields)
   }
   if (payload === null) throw new ApiError('暂时无法读取结果，请刷新后重试', response.status)
   return payload as T

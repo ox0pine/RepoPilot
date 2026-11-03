@@ -1,5 +1,6 @@
 import { reactive, watch } from 'vue'
 import { getTaskStats, listTasks, type TaskStats, type TaskStatus, type TaskSummary } from '../api/tasks'
+import { messageOf } from '../lib/errors'
 import { sessionToken, sessionVersion } from './session'
 
 export const taskStore = reactive({
@@ -8,8 +9,6 @@ export const taskStore = reactive({
   listLoading: false,
   listError: null as string | null,
   stats: null as TaskStats | null,
-  statsLoading: false,
-  statsError: null as string | null,
   moreLoading: false,
   filter: null as TaskStatus | null,
 })
@@ -31,10 +30,6 @@ function trackRequest(): AbortController {
 
 function isCurrent(version: number, sequence: number, controller: AbortController): boolean {
   return version === sessionVersion() && sequence === refreshSequence && !controller.signal.aborted
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请求失败，请重试'
 }
 
 let pollTimer: ReturnType<typeof setTimeout> | undefined
@@ -107,8 +102,6 @@ export function resetTasks(): void {
   taskStore.listLoading = false
   taskStore.listError = null
   taskStore.stats = null
-  taskStore.statsLoading = false
-  taskStore.statsError = null
   taskStore.moreLoading = false
   taskStore.filter = null
 }
@@ -126,10 +119,8 @@ export async function refreshTasks(): Promise<void> {
   stopPoll()
   abortRequests()
   taskStore.listLoading = true
-  taskStore.statsLoading = true
   taskStore.moreLoading = false
   taskStore.listError = null
-  taskStore.statsError = null
   taskStore.nextCursor = null
   const listController = trackRequest()
   const statsController = trackRequest()
@@ -142,7 +133,7 @@ export async function refreshTasks(): Promise<void> {
         taskStore.items = result.items
         taskStore.nextCursor = result.next_cursor
       } catch (error) {
-        if (isCurrent(version, sequence, listController)) taskStore.listError = errorMessage(error)
+        if (isCurrent(version, sequence, listController)) taskStore.listError = messageOf(error)
       } finally {
         controllers.delete(listController)
         if (isCurrent(version, sequence, listController)) taskStore.listLoading = false
@@ -152,11 +143,10 @@ export async function refreshTasks(): Promise<void> {
       try {
         const result = await getTaskStats(statsController.signal)
         if (isCurrent(version, sequence, statsController)) taskStore.stats = result
-      } catch (error) {
-        if (isCurrent(version, sequence, statsController)) taskStore.statsError = errorMessage(error)
+      } catch {
+        // 列表侧的 listError 已表达失败
       } finally {
         controllers.delete(statsController)
-        if (isCurrent(version, sequence, statsController)) taskStore.statsLoading = false
       }
     })(),
   ])
@@ -183,7 +173,7 @@ export async function loadMoreTasks(): Promise<void> {
     }
     taskStore.nextCursor = result.next_cursor
   } catch (error) {
-    if (isCurrent(version, sequence, controller)) taskStore.listError = errorMessage(error)
+    if (isCurrent(version, sequence, controller)) taskStore.listError = messageOf(error)
   } finally {
     controllers.delete(controller)
     if (isCurrent(version, sequence, controller)) taskStore.moreLoading = false
@@ -198,6 +188,12 @@ export function setTaskFilter(status: TaskStatus | null): void {
 
 export function setAutoGenerate(id: string): void {
   if (sessionToken.value) autoGenerate.add(id)
+}
+
+// Detail-page writes carry the new revision; the list must show it without a refetch.
+export function upsertTaskSummary(summary: TaskSummary): void {
+  const existing = taskStore.items.find(item => item.id === summary.id)
+  if (existing && summary.revision >= existing.revision) Object.assign(existing, summary)
 }
 
 export function consumeAutoGenerate(id: string): boolean {

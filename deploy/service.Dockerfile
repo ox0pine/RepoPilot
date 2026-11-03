@@ -1,6 +1,8 @@
+# API and worker share one dependency install; only the entry point differs.
 FROM ghcr.io/astral-sh/uv:0.12.22 AS uv
-FROM python:3.12-slim
+FROM docker:27-cli AS docker_cli
 
+FROM python:3.12-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -16,5 +18,12 @@ COPY src ./src
 RUN uv sync --locked --no-editable
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+FROM base AS api
 EXPOSE 8000
 CMD ["uvicorn", "repopilot.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+FROM base AS worker
+# The worker talks to the host daemon only; task containers get no socket or credentials.
+COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
+CMD ["python", "-m", "repopilot.worker"]

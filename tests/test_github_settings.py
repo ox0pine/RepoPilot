@@ -4,8 +4,6 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 import json
-import os
-import uuid
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
@@ -15,10 +13,7 @@ from pydantic import SecretStr, ValidationError
 import pytest
 import pytest_asyncio
 from sqlalchemy import event, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import repopilot.api.app as app_module
-from repopilot.config import AppSettings
 from repopilot.domain.settings import (
     GitHubSettingsUpdate,
     InvalidGitHubSettingsError,
@@ -26,8 +21,7 @@ from repopilot.domain.settings import (
     normalize_ssh_public_key,
     validate_ssh_pair,
 )
-from repopilot.integration.github import GitHubClient
-from repopilot.persistence.database import Database, GitHubSettingsRow
+from repopilot.persistence.database import GitHubSettingsRow
 from repopilot.persistence.settings import (
     GitHubEncryptionUnavailableError,
     GitHubSettingsRepository,
@@ -35,7 +29,8 @@ from repopilot.persistence.settings import (
 )
 
 
-WORKBENCH_TOKEN = "test-workbench-token-not-a-real-credential"
+
+
 MARKER_TOKEN = "test-github-token-not-a-real-credential"
 
 
@@ -61,47 +56,14 @@ def encryption_key():
     return Fernet.generate_key()
 
 
-@pytest_asyncio.fixture
-async def database():
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        pytest.skip("TEST_DATABASE_URL must point to a dedicated PostgreSQL test database")
-    schema = "github_test_" + uuid.uuid4().hex
-    admin = create_async_engine(url, hide_parameters=True)
-    engine = None
-    try:
-        async with admin.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        engine = create_async_engine(
-            url,
-            hide_parameters=True,
-            pool_pre_ping=True,
-            connect_args={"server_settings": {"search_path": schema}},
-        )
-        # Bind the real Database implementation without opening its default engine.
-        isolated = Database.__new__(Database)
-        isolated.engine = engine
-        isolated.sessions = async_sessionmaker(engine, expire_on_commit=False)
-        await isolated.initialize()
-        yield isolated
-    finally:
-        if engine is not None:
-            await engine.dispose()
-        async with admin.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin.dispose()
-
-
 @pytest.fixture
 def repository(database, encryption_key):
     return GitHubSettingsRepository(database, SecretStr(encryption_key.decode()))
 
 
 @pytest_asyncio.fixture
-async def route_app(database, encryption_key, monkeypatch):
-    redis_url = os.environ.get("TEST_REDIS_URL")
-    if not redis_url:
-        pytest.skip("TEST_REDIS_URL must point to a dedicated test Redis")
+async def route_app(app_client, encryption_key):
+    """This suite's GitHub mock: an empty key list that records registrations."""
     keys = []
 
     def register_key(request):
@@ -113,28 +75,11 @@ async def route_app(database, encryption_key, monkeypatch):
 
     @asynccontextmanager
     async def open_app(*, github_transport=None, master_key=encryption_key):
-        key = master_key.decode() if isinstance(master_key, bytes) else master_key
-        runtime = AppSettings(
-            _env_file=None,
-            api_token=SecretStr(WORKBENCH_TOKEN),
-            github_credentials_key=SecretStr(key) if key is not None else None,
-            database_url=os.environ["TEST_DATABASE_URL"],
-            redis_url=redis_url,
-        )
-        with monkeypatch.context() as patch:
-            patch.setattr(app_module, "Database", lambda url: database)
-            patch.setattr(
-                app_module, 'GitHubClient', lambda: GitHubClient(
-                    transport=github_transport or httpx.MockTransport(register_key),
-                )
-            )
-            app = app_module.create_app(runtime)
-            async with app.router.lifespan_context(app):
-                async with httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app), base_url="http://testserver",
-                    headers={"Authorization": f"Bearer {WORKBENCH_TOKEN}"},
-                ) as client:
-                    yield client
+        async with app_client(
+            github_transport=github_transport or httpx.MockTransport(register_key),
+            master_key=master_key,
+        ) as client:
+            yield client
 
     yield open_app
 

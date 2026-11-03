@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
 
+from repopilot.execution.paths import relative_path
 from repopilot.execution.workspace import ToolError, Workspace
 
 
@@ -137,17 +138,16 @@ def validate_batch(raw_calls: object, seen_call_ids: set[str]) -> tuple[ToolCall
                 if key in {'content', 'old_text', 'new_text'} and len(value.encode()) > 1024 * 1024:
                     raise ValueError('Too large')
             if 'path' in args:
-                path = args['path']
-                if not path or path.startswith('/') or '\\' in path or any(part == '..' for part in path.split('/')):
-                    raise ValueError('Unsafe path')
-                if path == '.' and name not in {'search', 'lsp_status', 'lsp_diagnostics', 'lsp_workspace_symbols'}:
-                    raise ValueError('Not a file')
+                # Overwrite with the normalized path: one file has one identity.
+                args['path'] = relative_path(
+                    args['path'],
+                    allow_dot=name in {'search', 'lsp_status', 'lsp_diagnostics', 'lsp_workspace_symbols'},
+                )
             if name == 'read_file' and not 0 <= args['end_line'] - args['start_line'] < 200:
                 raise ValueError('Invalid line range')
             for key in ('cwd', 'project'):
-                path = args.get(key)
-                if path is not None and (not path or path.startswith('/') or '\\' in path or '..' in path.split('/')):
-                    raise ValueError('Unsafe project path')
+                if args.get(key) is not None:
+                    args[key] = relative_path(args[key], allow_dot=True)
             if name == 'lsp_code_actions':
                 if (args['end_line'] is None) != (args['end_column'] is None):
                     raise ValueError('Incomplete end position')

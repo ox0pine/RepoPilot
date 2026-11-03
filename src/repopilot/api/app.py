@@ -21,7 +21,6 @@ from repopilot.application.tasks import TaskService
 from repopilot.integration.goals import GoalClient
 from repopilot.integration.task_sources import GitHubSourceClient
 from repopilot.persistence.tasks import TaskRepository
-from repopilot.application.runs import RunService
 from repopilot.persistence.runs import RunRepository
 from repopilot.integration.delivery import DeliveryService
 from repopilot.persistence.deliveries import DeliveryRepository
@@ -50,7 +49,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         TaskRepository(database), model_repository, github_repository,
         GitHubSourceClient(), GoalClient(),
     )
-    run_service = RunService(RunRepository(database, default_image=runtime.execution_image))
+    run_repository = RunRepository(database, default_image=runtime.execution_image)
     delivery_service = DeliveryService(DeliveryRepository(database), github_repository)
 
     @asynccontextmanager
@@ -74,19 +73,22 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     app = FastAPI(title="RepoPilot API", version="0.1.0", lifespan=lifespan)
     app.state.settings = runtime
-    app.state.database = database
-    app.state.redis = redis
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error: RequestValidationError) -> JSONResponse:
-        detail = "请求参数无效，请检查来源链接、完整 SHA 或操作版本" if request.url.path.startswith('/api/tasks') else "Invalid request payload"
-        return JSONResponse(status_code=422, content={"detail": detail})
+        items = []
+        for entry in error.errors():
+            msg = str(entry.get('msg', '')).removeprefix('Value error, ')
+            if not any('\u4e00' <= char <= '\u9fff' for char in msg):
+                msg = '请求参数无效'
+            items.append({'loc': list(entry.get('loc', ())), 'msg': msg})
+        return JSONResponse(status_code=422, content={'detail': items})
 
     app.include_router(build_auth_router(), prefix="/api")
     app.include_router(build_settings_router(service, github_service), prefix="/api")
     app.include_router(build_models_router(service), prefix="/api")
     app.include_router(build_tasks_router(task_service), prefix="/api")
-    app.include_router(build_runs_router(run_service, delivery_service, runtime.execution_image), prefix="/api")
+    app.include_router(build_runs_router(run_repository, delivery_service, runtime.execution_image), prefix="/api")
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

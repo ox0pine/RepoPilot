@@ -1,67 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from unittest.mock import patch
-from uuid import uuid4
 
 import pytest
-
-from repopilot.domain.context import RepositoryContext
-from repopilot.domain.tasks import SourceSnapshot
-from repopilot.execution.git import GitHubGitCredentials
-from repopilot.execution.workspace import Workspace
-
-DOCKER_ENABLED = os.environ.get('REPOPILOT_DOCKER_TESTS') == '1'
-real_docker = pytest.mark.skipif(
-    not DOCKER_ENABLED, reason='Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage',
-)
-COMMIT = 'a' * 40
-TOKEN = 'semantic-fixture-secret-never-enters-run'
-
-
-def fixture_source() -> SourceSnapshot:
-    now = datetime.now(UTC)
-    return SourceSnapshot(
-        repository_url='https://github.com/example/semantic-fixture',
-        baseline_commit=COMMIT, issue_number=1, issue_title='Semantic fixture',
-        issue_body='', issue_url='https://github.com/example/semantic-fixture/issues/1',
-        issue_updated_at=now, fetched_at=now,
-        repository_context=RepositoryContext(commit=COMMIT, tree=[], files=[], omissions=[], tree_truncated=False),
-    )
-
-
-@asynccontextmanager
-async def prepared_workspace(files: dict[str, str]):
-    if not DOCKER_ENABLED:
-        pytest.skip('Set REPOPILOT_DOCKER_TESTS=1 for real Docker coverage')
-    assert shutil.which('docker'), 'Docker coverage enabled but Docker CLI is unavailable'
-
-    async def clone_fixture(repository_url, commit, destination, credentials, *, strategy, timeout=90):
-        destination.mkdir()
-        (destination / '.git').mkdir()
-        for name, content in files.items():
-            target = destination / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
-
-    workspace = Workspace(uuid4())
-    try:
-        with patch('repopilot.execution.workspace.clone_fixed_commit', clone_fixture):
-            await workspace.prepare(
-                source=fixture_source(),
-                github_credentials=GitHubGitCredentials(api_token=TOKEN, private_key=''),
-                git_auth_strategy='https_token',
-                image=os.environ.get('REPOPILOT_TEST_IMAGE', 'repopilot-dev:local'),
-            )
-        result = await workspace.setup()
-        assert result.exit_code == 0, result.output
-        yield workspace
-    finally:
-        await workspace.cleanup()
+from conftest import real_docker
 
 
 def python_project(name: str = 'semantic-fixture', *, requires: str = '>=3.12,<3.13',
@@ -115,13 +57,12 @@ def test_manifest_free_sources_remain_valid_without_invented_projects(tmp_path):
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_python_projects_have_independent_venvs_and_current_interpreters():
+async def test_real_python_projects_have_independent_venvs_and_current_interpreters(docker_workspace):
     files = {
         'first/pyproject.toml': python_project('first'),
         'second/pyproject.toml': python_project('second'),
     }
-    async with prepared_workspace(files) as workspace:
+    async with docker_workspace(files, setup=True) as (workspace, _):
         info = await workspace.environment_info()
         projects = {project['root']: project for project in info['projects']}
         assert set(projects) == {'first', 'second'}
@@ -142,9 +83,8 @@ async def test_real_python_projects_have_independent_venvs_and_current_interpret
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_manifest_free_workspace_keeps_basic_tools_offline():
-    async with prepared_workspace({'hello.py': 'print("hello")\n'}) as workspace:
+async def test_real_manifest_free_workspace_keeps_basic_tools_offline(docker_workspace):
+    async with docker_workspace({'hello.py': 'print("hello")\n'}, setup=True) as (workspace, _):
         assert (await workspace.environment_info())['projects'] == []
         result = await workspace.tool('read_file', {'path': 'hello.py'})
         assert 'print("hello")' in result['content']
@@ -235,26 +175,24 @@ def test_project_discovery_rejects_manifest_links(tmp_path):
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('files', [
     {'pyproject.toml': python_project(requires='>=99')},
     {'package.json': node_project(engines={'node': '>=99'})},
     {'package.json': node_project(), 'package-lock.json': '{}', 'yarn.lock': '# conflict'},
     {'package.json': node_project(manager='pnpm@9.15.9'), 'package-lock.json': '{}'},
 ], ids=['python-version', 'node-version', 'multiple-locks', 'manager-lock-mismatch'])
-async def test_real_incompatible_environment_is_explicitly_blocked(files):
+async def test_real_incompatible_environment_is_explicitly_blocked(docker_workspace, files):
     from repopilot.execution.workspace import WorkspaceError
 
     with pytest.raises(WorkspaceError) as caught:
-        async with prepared_workspace(files):
+        async with docker_workspace(files, setup=True):
             pytest.fail('Incompatible environment must not become model-ready')
     assert caught.value.blocked
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_python_compatible_runtime_is_automatically_provisioned():
-    async with prepared_workspace({'pyproject.toml': python_project(requires='>=3.11,<3.12')}) as workspace:
+async def test_real_python_compatible_runtime_is_automatically_provisioned(docker_workspace):
+    async with docker_workspace({'pyproject.toml': python_project(requires='>=3.11,<3.12')}, setup=True) as (workspace, _):
         project = (await workspace.environment_info())['projects'][0]
         assert project['ready'], project
         assert project['python_version'].startswith('3.11.'), project
@@ -263,9 +201,8 @@ async def test_real_python_compatible_runtime_is_automatically_provisioned():
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_node_compatible_runtime_is_automatically_provisioned():
-    async with prepared_workspace({'package.json': node_project(engines={'node': '>=20 <21'})}) as workspace:
+async def test_real_node_compatible_runtime_is_automatically_provisioned(docker_workspace):
+    async with docker_workspace({'package.json': node_project(engines={'node': '>=20 <21'})}, setup=True) as (workspace, _):
         project = (await workspace.environment_info())['projects'][0]
         assert project['ready'], project
         assert project['node_version'].startswith('20.'), project
@@ -323,12 +260,11 @@ def test_existing_uv_lock_is_authoritative_and_not_rewritten(tmp_path, monkeypat
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_capture_preserves_tracked_generated_directory_files_only():
-    async with prepared_workspace({
+async def test_real_capture_preserves_tracked_generated_directory_files_only(docker_workspace):
+    async with docker_workspace({
         'hello.py': 'print("hello")\n',
         'dist/keep.txt': 'baseline tracked content\n',
-    }) as workspace:
+    }, setup=True) as (workspace, _):
         changed = await workspace.shell(
             "printf 'edited tracked content\\n' > dist/keep.txt; "
             "printf 'new generated content\\n' > dist/generated.txt"
@@ -342,12 +278,13 @@ async def test_real_capture_preserves_tracked_generated_directory_files_only():
 
 
 @real_docker
-@pytest.mark.asyncio
 @pytest.mark.parametrize('manager,version', [('pnpm', '10.11.0'), ('yarn', '4.9.2')])
-async def test_real_exact_package_manager_is_automatically_installed(manager, version):
-    async with prepared_workspace({
+async def test_real_exact_package_manager_is_automatically_installed(
+    docker_workspace, manager, version,
+):
+    async with docker_workspace({
         'package.json': node_project(manager=f'{manager}@{version}'),
-    }) as workspace:
+    }, setup=True) as (workspace, _):
         project = (await workspace.environment_info())['projects'][0]
         assert project['ready'], project
         assert project['package_manager'] == f'{manager}@{version}', project
@@ -357,18 +294,17 @@ async def test_real_exact_package_manager_is_automatically_installed(manager, ve
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_python_src_package_is_installed_even_without_runtime_dependencies():
+async def test_real_python_src_package_is_installed_even_without_runtime_dependencies(docker_workspace):
     manifest = (
         python_project('tiny-src-fixture')
         + '\n[build-system]\nrequires = ["setuptools==80.9.0"]\n'
         + 'build-backend = "setuptools.build_meta"\n'
         + '\n[tool.setuptools.packages.find]\nwhere = ["src"]\n'
     )
-    async with prepared_workspace({
+    async with docker_workspace({
         'pyproject.toml': manifest,
         'src/tiny_fixture/__init__.py': 'VALUE = 42\n',
-    }) as workspace:
+    }, setup=True) as (workspace, _):
         project = (await workspace.environment_info())['projects'][0]
         assert project['ready'], project
         result = await workspace.shell(
@@ -407,9 +343,8 @@ NPM_WORKSPACE_FILES = {
 
 
 @real_docker
-@pytest.mark.asyncio
-async def test_real_npm_workspace_inherits_root_environment_and_resolves_crosspackage_import():
-    async with prepared_workspace(NPM_WORKSPACE_FILES) as workspace:
+async def test_real_npm_workspace_inherits_root_environment_and_resolves_crosspackage_import(docker_workspace):
+    async with docker_workspace(NPM_WORKSPACE_FILES, setup=True) as (workspace, _):
         info = await workspace.environment_info()
         projects = {project['root']: project for project in info['projects']}
         assert set(projects) == {'.', 'packages/shared', 'packages/app'}, info

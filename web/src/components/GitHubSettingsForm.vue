@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { NAlert, NButton, NCollapse, NCollapseItem, NForm, NFormItem, NInput, NSpin, type InputInst } from 'naive-ui'
 import { Copy } from '@lucide/vue'
-import { ApiError } from '../api/client'
 import { authorizeGitHubSettings, getGitHubSettings, updateGitHubSettings, type GitHubSettings } from '../api/settings'
+import { isUnknownOutcome, messageOf } from '../lib/errors'
 import { sessionVersion } from '../stores/session'
 
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -87,7 +87,7 @@ async function load(): Promise<void> {
       saveNotice.value = '已重新读取服务器配置，但无法确认上次保存是否成功。草稿仍保留；确认当前状态后再保存。'
     }
   } catch (cause) {
-    if (isCurrent()) loadError.value = cause instanceof Error ? cause.message : '无法读取 GitHub 配置，请重试。'
+    if (isCurrent()) loadError.value = messageOf(cause, '无法读取 GitHub 配置，请重试。')
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -113,8 +113,8 @@ async function save(): Promise<void> {
     saveNotice.value = 'Token 已保存。SSH 公钥仍需单独注册。'
   } catch (cause) {
     if (!isCurrent()) return
-    saveUncertain.value = !(cause instanceof ApiError) || cause.status >= 500 || cause.status < 400
-    saveError.value = cause instanceof Error ? cause.message : '无法保存 token，请检查后重试。'
+    saveUncertain.value = isUnknownOutcome(cause)
+    saveError.value = messageOf(cause, '无法保存 token，请检查后重试。')
     if (saveUncertain.value) saveNotice.value = '无法确认保存结果。请先重新读取配置；系统不会自动重试。'
   } finally {
     if (isCurrent()) {
@@ -145,7 +145,7 @@ async function authorize(): Promise<void> {
       ? 'SSH 公钥已注册到 GitHub。'
       : '此 SSH 公钥已在 GitHub 注册。'
   } catch (cause) {
-    if (isCurrent()) authorizationError.value = `${cause instanceof Error ? cause.message : '无法注册 SSH 公钥'}。结果可能尚未确认；请先在 GitHub 核对，系统不会自动重试。`
+    if (isCurrent()) authorizationError.value = `${messageOf(cause, '无法注册 SSH 公钥')}。结果可能尚未确认；请先在 GitHub 核对，系统不会自动重试。`
   } finally {
     if (isCurrent()) authorizing.value = false
   }

@@ -6,16 +6,16 @@ export type ModelSettings = {
   api_key_configured: boolean
 }
 
-export function getSettings(): Promise<ModelSettings> {
-  return request<ModelSettings>('/api/settings')
+export function getSettings(signal?: AbortSignal): Promise<ModelSettings> {
+  return request<ModelSettings>('/api/settings', { signal })
 }
 
-export function updateModelSettings(payload: { base_url: string; api_key?: string; model: string }): Promise<ModelSettings> {
-  return request<ModelSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(payload) })
+export function updateModelSettings(payload: { base_url: string; api_key?: string; model: string }, signal?: AbortSignal): Promise<ModelSettings> {
+  return request<ModelSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(payload), signal })
 }
 
-export function refreshModels(payload: { base_url: string; api_key?: string }): Promise<{ models: string[] }> {
-  return request<{ models: string[] }>('/api/models/refresh', { method: 'POST', body: JSON.stringify(payload) })
+export function refreshModels(payload: { base_url: string; api_key?: string }, signal?: AbortSignal): Promise<{ models: string[] }> {
+  return request<{ models: string[] }>('/api/models/refresh', { method: 'POST', body: JSON.stringify(payload), signal })
 }
 
 export type GitHubSettings = {

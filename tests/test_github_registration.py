@@ -14,7 +14,6 @@ TOKEN = "github-registration-test-token-not-a-real-credential"
 INVALID_RESPONSE = "GitHub returned an invalid response"
 NETWORK_ERROR = "Unable to contact GitHub; the result may be unknown. Try again to check the key"
 REJECTED_KEY = "GitHub rejected the SSH public key; it may already belong to another account"
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture

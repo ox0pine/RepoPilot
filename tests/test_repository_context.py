@@ -20,7 +20,6 @@ from repopilot.integration.context import (
 )
 from repopilot.integration.task_sources import GitHubSourceClient
 
-pytestmark = pytest.mark.asyncio
 COMMIT = 'a' * 40
 TOKEN = 'context-test-secret'
 

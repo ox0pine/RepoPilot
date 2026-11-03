@@ -14,6 +14,13 @@ from pathlib import Path
 
 ROOT = Path('/workspace')
 MAX_FILE = 1024 * 1024
+# Must stay identical to repopilot.repo_policy.IGNORED_DIRECTORIES: this program
+# runs with -I -S in the runtime image, so the host module is not importable.
+IGNORED_DIRECTORIES = {
+    '.git', 'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build',
+    '.next', '.nuxt', 'vendor', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+    '.yarn', '.pnpm-store',
+}
 
 
 def path(value: str, *, new: bool = False) -> Path:
@@ -132,7 +139,7 @@ def execute(name: str, args: dict) -> dict:
         return shell(args['command'], args['timeout'], args.get('cwd', '.'), args.get('environment'))
     if name == 'environment':
         stop_residuals()
-        namespace = {'__name__': 'repopilot_environment'}
+        namespace = {'__name__': 'repopilot_environment', 'IGNORED_DIRECTORIES': IGNORED_DIRECTORIES}
         try:
             exec(compile(args['program'], '<trusted-environment>', 'exec'), namespace)
             return namespace['prepare_environments'](ROOT, network=args.get('network', False), verify=args.get('verify', False))
@@ -148,7 +155,7 @@ def execute(name: str, args: dict) -> dict:
         files = []
         count = 0
         for directory, dirs, names in os.walk(ROOT, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in {'.git', '.venv', 'node_modules', '__pycache__', 'dist', 'build', '.yarn'} and not (Path(directory) / d).is_symlink())
+            dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRECTORIES and not (Path(directory) / d).is_symlink())
             count += len(dirs) + len(names)
             if count > 20000:
                 raise ValueError('Snapshot exceeds 20000 entries')
@@ -356,14 +363,14 @@ def transfer(mode: str) -> None:
     tracked = set(tracked)
     ancestors = {('/'.join(name.split('/')[:index])) for name in tracked for index in range(1, len(name.split('/')))}
     def candidates():
-        ignores = {'.venv', 'node_modules', '__pycache__', 'dist', 'build', '.yarn', '.pnpm-store'}
+        ignores = IGNORED_DIRECTORIES
         for directory, dirs, files in os.walk(ROOT, followlinks=False):
             relative = Path(directory).relative_to(ROOT)
             inside_ignored = any(part in ignores for part in relative.parts)
             dirs[:] = sorted(
                 d for d in dirs
-                if d != '.git' and ((not inside_ignored and d not in ignores)
-                                    or (relative / d).as_posix() in ancestors)
+                if ((not inside_ignored and d not in ignores)
+                    or (relative / d).as_posix() in ancestors)
             )
             for filename in sorted(dirs + files):
                 if filename == '.git':

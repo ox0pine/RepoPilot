@@ -14,7 +14,6 @@ from repopilot.integration.goals import GoalClient, MAX_RESPONSE_BYTES
 from repopilot.persistence.settings import StoredModelSettings
 
 
-pytestmark = pytest.mark.asyncio
 TOKEN = "provider-test-secret-not-a-real-key"
 GOAL = {
     "summary": "修复 Issue 描述的问题",

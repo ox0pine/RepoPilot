@@ -11,7 +11,9 @@ import httpx
 
 from repopilot.domain.context import ContextFile, RepositoryContext
 from repopilot.domain.tasks import CreateTask, TaskError, github_source_coordinates
+from repopilot.integration import github_http
 from repopilot.integration.task_sources import _check_status, _invalid
+from repopilot.repo_policy import IGNORED_DIRECTORIES
 
 TREE_RESPONSE_LIMIT = 2 * 1024 * 1024
 TREE_ENTRY_LIMIT = 10_000
@@ -20,10 +22,6 @@ BLOB_LIMIT = 12
 BLOB_DOWNLOAD_LIMIT = 64 * 1024
 FILE_CONTENT_LIMIT = 16 * 1024
 TOTAL_CONTENT_LIMIT = 64 * 1024
-EXCLUDED_DIRECTORIES = {
-    '.git', 'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build',
-    '.next', '.nuxt', 'vendor', '.pytest_cache', '.mypy_cache', '.ruff_cache',
-}
 ENTRY_FILES = (
     'pyproject.toml', 'package.json', 'requirements.txt', 'setup.py', 'setup.cfg',
     'Cargo.toml', 'go.mod', 'Makefile', 'tsconfig.json',
@@ -41,7 +39,7 @@ def _safe_path(path: str) -> bool:
         return False
     if any(ord(char) < 32 or ord(char) == 127 for char in path):
         return False
-    if any(part.lower() in EXCLUDED_DIRECTORIES for part in parts):
+    if any(part.lower() in IGNORED_DIRECTORIES for part in parts):
         return False
     for part in parts:
         name = part.lower()
@@ -71,17 +69,8 @@ class RepositoryContextClient:
             raise TaskError(503, '请先在设置中配置 GitHub 凭据')
         owner, repository, _ = github_source_coordinates(payload.repository_url, payload.issue_url)
         prefix = f'/repos/{owner}/{repository}/git'
-        headers = {
-            'Authorization': f'Bearer {api_token}',
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2026-03-10',
-            'User-Agent': 'RepoPilot',
-        }
         try:
-            async with httpx.AsyncClient(
-                base_url='https://api.github.com', headers=headers, transport=self.transport,
-                timeout=15.0, follow_redirects=False, trust_env=False,
-            ) as client:
+            async with github_http.client(self.transport, timeout=15.0, token=api_token) as client:
                 raw = await self._download(
                     client, f'{prefix}/trees/{payload.baseline_commit}?recursive=1',
                     TREE_RESPONSE_LIMIT,

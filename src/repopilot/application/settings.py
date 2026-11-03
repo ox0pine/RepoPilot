@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repopilot.domain.settings import ModelSettings, PublicModelSettings
+from repopilot.domain.settings import ModelSettings, PublicModelSettings, resolve_api_key
 from repopilot.integration.cache import ModelCache
 from repopilot.integration.models import fetch_models
 from repopilot.persistence.settings import SettingsRepository, StoredModelSettings
@@ -42,11 +42,12 @@ class SettingsService:
 
     async def refresh_models(self, *, base_url: str, api_key: str | None) -> list[str]:
         normalized_url = self._validate(base_url).base_url
-        if api_key is None:
-            settings = await self.repository.load()
-            token = settings.api_key if normalized_url == settings.base_url else ""
-        else:
-            token = api_key.strip()
+        saved = await self.repository.load() if api_key is None else None
+        token = resolve_api_key(
+            base_url=normalized_url, api_key=api_key,
+            saved_base_url=saved.base_url if saved is not None else normalized_url,
+            saved_api_key=saved.api_key if saved is not None else "",
+        )
         cached = await self.cache.get(normalized_url, token)
         if cached is not None:
             return cached
