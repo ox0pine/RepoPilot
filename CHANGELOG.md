@@ -6,6 +6,30 @@
 
 ## 未发布
 
+### 审阅界面收尾：详情列加宽与重复信息删除
+
+按 slop 检查表逐屏复核了登录、任务列表、新建任务、任务详情（补丁与检查）、设置对话框及深色主题，没有命中任何一条：单一中性阶梯加 logo 的钴蓝强调、lucide 单尺寸单描边、零 emoji、400/500 两档字重、tabular 数字、一条缓动曲线、`prefers-reduced-motion` 全部关闭、补丁与检查表本身是这屏的主视觉。只做三处收尾：
+
+- 详情页单独加宽到 `--content-width-detail: 1120px`：补丁此前只能在 916px 里排 12px mono，1440 视口右侧还空出约 200px；现在补丁可用 1076px，列表仍 960、新建任务仍 720。
+- 任务列表标题下的一行不再重复筛选 chip 的数字：原文本列了待批准/生成失败/已批准，合计 4 项却写“5 项任务”，与 chip 完全重复；改为固定说明“每项任务固定一个仓库、一个 commit 和一个 Issue。”，计数只由可点的 chip 提供。
+- 同屏用 `margin: -8px 0 16px` 抵消 header 的 24px，改为 header `margin-bottom: 16px` + filters `margin: 0 0 16px`；API Key 占位符“输入访问密钥；免密服务可留空”与下方帮助重复同一条件，占位符收敛为“输入访问密钥”。
+
+保留未改：`.creation-note svg` 与 `.next-step > svg` 的 `margin-top: 3px` 是按 13px/1.7 行高对 16px 图标做的光学居中，属于“正好居中的奇数取值”。
+
+验证：`npm --prefix web run build`（`vue-tsc --noEmit` + Vite）通过；1440 视口实测 `.task` 宽 1120、补丁区宽 1076 且 `scrollWidth == clientWidth`（色带满宽、无横向滚动），列表 header/filters/card 间距 16/16；390×844 视口复测补丁区 322 宽、页面无横向溢出（行号降为单列 40px 并折行）。
+
+### 读取接口去写化与生成租约回收
+
+三个读接口此前都会写库：`detail` 先 `recover_expired` 再 `SELECT … FOR UPDATE` 就地判定过期，`list` 与 `stats` 各跑一条全表 UPDATE。前端按 revision 合并列表行，于是每次轮询都可能凭空推进 revision。
+
+- 读接口不再写库：`detail` 改用 `_read_row`（`SELECT … FOR SHARE`，只保证详情快照一致），`list`/`stats` 删除 `recover_expired`；`start_generation`、`complete_generation`、`fail_generation`、`approve` 仍在行锁内回收，写路径照旧判定“尝试已过期”。
+- 回收改由 API 生命周期任务执行：新增 `reap_generation_leases`，在启动检查（`database.initialize()`、设置读取、Redis ping）全部通过后创建，每 `GENERATION_REAP_SECONDS = 5` 秒调用一次 `recover_expired()`；单次失败只记 warning 并继续下一轮，关停时先 `set()` 再取消并 `gather`。多实例并发回收是幂等 UPDATE，不需要额外锁。代价是过期状态最多滞后约 5 秒。
+- 过期扫描补部分索引：`TaskRow` 新增 `tasks_generation_lease (generation_deadline) WHERE status = 'generating'`，回收语句只扫生成中的行，不再全表扫描。
+- 测试：`test_single_generation_and_expired_result_cannot_overwrite` 改为先断言读接口保持 `generating` 且 revision 不变，再显式 `recover_expired` 验证 `generation_failed`、错误文案与 revision +1（迟到结果不可覆盖的断言保留）；新增两个回收循环测试，一次成功扫描即停、单次失败不终止循环。
+- 文档：`docs/operations/maintenance.md` 说明回收任务与“读取不写库、状态最多滞后 5 秒”。
+
+验证：`ruff check src tests` 98 项，类别与改动前一致（本次未新增）；后端 `pytest tests` 497 passed、55 skipped（未设 `REPOPILOT_DOCKER_TESTS=1`，Docker 场景跳过）；在独立 schema 上跑 `Database.initialize()`，`create_all` 建出 `tasks_generation_lease … WHERE (status = 'generating')` 并播种单行设置；实际启动 API 后把任务置为过期 `generating`，连续 3 次 `GET /api/tasks/{id}` 与 `GET /api/tasks/stats` 全部返回 `generating`、revision 2（读不写），7 秒后同接口返回 `generation_failed`、`目标生成已中断，请重试`、revision 3。
+
 ### 冗余实现与死字段删除
 
 同一事实此前在多处各存一份，其中 6 处已经互相漂移。本轮每类事实只保留一个定义点：

@@ -114,6 +114,16 @@ class TaskRepository:
             setattr(row, field, value)
         row.revision += 1
 
+    @staticmethod
+    async def _read_row(session: AsyncSession, task_id: UUID) -> TaskRow:
+        # FOR SHARE keeps a coherent detail snapshot without modifying the row.
+        row = await session.scalar(
+            select(TaskRow).where(TaskRow.id == task_id).with_for_update(read=True)
+        )
+        if row is None:
+            raise TaskError(404, "对话不存在")
+        return row
+
     async def _locked(self, session: AsyncSession, task_id: UUID) -> tuple[TaskRow, datetime]:
         row = await session.scalar(select(TaskRow).where(TaskRow.id == task_id).with_for_update())
         if row is None:
@@ -162,10 +172,9 @@ class TaskRepository:
             return await self._detail(session, row)
 
     async def detail(self, task_id: UUID) -> TaskDetail:
-        await self.recover_expired(task_id)
         async with self._transaction() as session:
             # Lock briefly for a coherent revision, goals and message snapshot.
-            row, _ = await self._locked(session, task_id)
+            row = await self._read_row(session, task_id)
             return await self._detail(session, row)
 
     async def list(
@@ -174,7 +183,6 @@ class TaskRepository:
         if not 1 <= limit <= 50:
             raise TaskError(422, "每页对话数量必须为 1 到 50")
         boundary = decode_cursor(cursor) if cursor is not None else None
-        await self.recover_expired()
         async with self._transaction() as session:
             statement = select(TaskRow).order_by(TaskRow.updated_at.desc(), TaskRow.id.desc()).limit(limit + 1)
             if status is not None:
@@ -187,7 +195,6 @@ class TaskRepository:
             return TaskList(items=[self._summary(row) for row in page], next_cursor=next_cursor)
 
     async def stats(self) -> TaskStats:
-        await self.recover_expired()
         async with self._transaction() as session:
             counts = dict((await session.execute(
                 select(TaskRow.status, func.count()).group_by(TaskRow.status)

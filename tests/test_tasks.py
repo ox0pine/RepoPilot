@@ -8,6 +8,7 @@ import pytest
 from factories import make_goal, make_source, ready
 from sqlalchemy import text, update
 
+from repopilot.api.app import reap_generation_leases
 from repopilot.domain.tasks import TaskError
 from repopilot.persistence.database import TaskRow
 from repopilot.persistence.tasks import TaskRepository
@@ -54,8 +55,13 @@ async def test_single_generation_and_expired_result_cannot_overwrite(database):
         await repo.approve(task.id, running.revision, 1)
     async with database.session() as session, session.begin():
         await session.execute(update(TaskRow).where(TaskRow.id == task.id).values(generation_deadline=text("clock_timestamp() - interval '1 second'")))
+    # Reads never write: the expired lease survives until the reaper retires it.
+    stale = await repo.detail(task.id)
+    assert (stale.status, stale.revision) == ('generating', running.revision)
+    await repo.recover_expired(task.id)
     expired = await repo.detail(task.id)
     assert expired.status == 'generation_failed' and expired.last_error == '目标生成已中断，请重试'
+    assert expired.revision == stale.revision + 1
     fresh = await repo.start_generation(task.id, expired.revision, 'retry')
     assert await repo.complete_generation(task.id, attempts[0].generation_id, make_goal(summary='迟到内容'), 'test') is None
     assert await repo.fail_generation(task.id, attempts[0].generation_id, '迟到错误') is None
@@ -259,3 +265,33 @@ async def test_context_failure_does_not_persist_partial_task(api_client, control
     assert 'github-secret-marker' not in response.text
     assert (await client.get('/api/tasks/stats')).json()['total'] == 0
     assert (await client.get('/api/tasks')).json()['items'] == []
+
+
+class _CountingReaper:
+    """Repository stub: each sweep records a call and may stop the loop."""
+
+    def __init__(self, stop_after: int, *, fail_first: bool = False) -> None:
+        self.calls = 0
+        self.stop_after = stop_after
+        self.fail_first = fail_first
+        self.stop = asyncio.Event()
+
+    async def recover_expired(self) -> None:
+        self.calls += 1
+        if self.fail_first and self.calls == 1:
+            raise RuntimeError('transient database failure')
+        if self.calls >= self.stop_after:
+            self.stop.set()
+
+
+async def test_reaper_loop_sweeps_until_stop():
+    fake = _CountingReaper(1)
+    await asyncio.wait_for(reap_generation_leases(fake, fake.stop, 5), 1)
+    assert fake.calls == 1
+
+
+async def test_reaper_loop_survives_a_failed_sweep():
+    fake = _CountingReaper(2, fail_first=True)
+    # A failed sweep still waits for the next tick, so the interval must be short here.
+    await asyncio.wait_for(reap_generation_leases(fake, fake.stop, 0.01), 5)
+    assert fake.calls == 2

@@ -12,6 +12,8 @@ docker compose down
 
 当前只维护现行存储与协议格式，没有旧数据库升级、字段补齐或旧密钥迁移逻辑。来源快照必须含源码上下文；GitHub 密钥只支持完整、匹配的 Ed25519/OpenSSH 格式。普通重启不是清库，不能将“只支持当前格式”理解为可以自动删除数据。
 
+API 每 5 秒回收一次过期的 Goal 生成租约（`status = 'generating'` 且 `generation_deadline` 已过），把任务置为 `generation_failed` 并递增 revision。读取接口不再写库，因此该状态最多滞后约 5 秒；不要据此认为任务仍在生成。
+
 Worker 使用 PostgreSQL session advisory lock 保证单实例，按 FIFO 顺序领取任务。每两秒检查锁连接、每秒检查取消请求；第二个 Worker 会退出。Worker 不配置自动重启，异常停止后应先排查，再显式启动。不要同时运行容器 Worker 和宿主 Worker。
 
 Redis 只缓存模型列表：运行中缓存读取失败会请求提供方，写入失败不丢弃已获取列表；提供方失败不会回退到过期结果。API 启动时仍要求 Redis 可连接。

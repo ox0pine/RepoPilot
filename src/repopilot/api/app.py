@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -31,6 +33,24 @@ from .routes.settings import build_router as build_settings_router
 from .routes.tasks import build_router as build_tasks_router
 from .routes.runs import build_router as build_runs_router
 
+GENERATION_REAP_SECONDS = 5
+logger = logging.getLogger(__name__)
+
+
+async def reap_generation_leases(
+    repository: TaskRepository, stop: asyncio.Event, interval: float,
+) -> None:
+    """Retire expired goal-generation leases until the API shuts down."""
+    while not stop.is_set():
+        try:
+            await repository.recover_expired()
+        except Exception:  # noqa: BLE001 - one failed sweep must not stop later ones
+            logger.warning("Generation lease recovery failed; retrying")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
+
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
     runtime = settings or get_settings()
@@ -45,8 +65,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     github_repository = GitHubSettingsRepository(database, runtime.github_credentials_key)
     service = SettingsService(model_repository, ModelCache(redis))
     github_service = GitHubSettingsService(github_repository, GitHubClient())
+    task_repository = TaskRepository(database)
     task_service = TaskService(
-        TaskRepository(database), model_repository, github_repository,
+        task_repository, model_repository, github_repository,
         GitHubSourceClient(), GoalClient(),
     )
     run_repository = RunRepository(database, default_image=runtime.execution_image)
@@ -54,6 +75,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        stop_reaper = asyncio.Event()
+        reaper: asyncio.Task | None = None
         try:
             try:
                 await database.initialize()
@@ -64,8 +87,15 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 await redis.ping()
             except (RedisError, OSError):
                 raise RuntimeError("Unable to connect to Redis model cache") from None
+            reaper = asyncio.create_task(
+                reap_generation_leases(task_repository, stop_reaper, GENERATION_REAP_SECONDS)
+            )
             yield
         finally:
+            stop_reaper.set()
+            if reaper is not None:
+                reaper.cancel()
+                await asyncio.gather(reaper, return_exceptions=True)
             try:
                 await redis.aclose()
             finally:

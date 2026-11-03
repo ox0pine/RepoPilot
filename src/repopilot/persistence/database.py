@@ -48,6 +48,11 @@ class TaskRow(Base):
             name="task_status",
         ),
         CheckConstraint("revision >= 1 AND current_goal_version >= 0", name="task_versions"),
+        Index(
+            "tasks_generation_lease",
+            "generation_deadline",
+            postgresql_where=sql_text("status = 'generating'"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
