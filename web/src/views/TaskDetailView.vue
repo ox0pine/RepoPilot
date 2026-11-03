@@ -352,7 +352,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.task { width: 100%; max-width: var(--content-width); color: var(--text); overflow-wrap: anywhere; }
+.task { width: 100%; max-width: var(--content-width-detail); color: var(--text); overflow-wrap: anywhere; }
 .task-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin: 8px 0 24px; }
 .task-title-block { min-width: 0; }
 h1 { margin: 0 0 8px; font-size: 26px; font-weight: 500; line-height: 1.3; }

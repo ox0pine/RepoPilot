@@ -8,5 +8,7 @@
   --dur-base: 200ms;
   /* Page column: every workspace screen shares one gutter and one width. */
   --content-width: 960px;
+  /* The review screen gives the patch more room; it is the thing people read there. */
+  --content-width-detail: 1120px;
   --page-gutter: 32px;
 }

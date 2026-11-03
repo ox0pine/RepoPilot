@@ -149,7 +149,7 @@ onBeforeUnmount(() => { active = false; refreshSequence++; apiKey.value = ''; ab
         </NFormItem>
         <div v-if="usingSavedKey && !apiKeyEditing" class="saved-key"><KeyRound :size="16" :stroke-width="1.5" aria-hidden="true" /><div><strong>API Key 已保存</strong><p class="help">密钥不会回显。</p></div><NButton size="small" ref="changeKeyButton" attr-type="button" :disabled="saving" @click="startApiKeyEdit">更换</NButton></div>
         <NFormItem v-else label="API Key" :label-props="{ for: 'api-key' }">
-          <div class="field-content"><NInput ref="keyInput" v-model:value="apiKey" type="password" show-password-on="click" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false }" placeholder="输入访问密钥；免密服务可留空" /><div class="key-help"><p class="help">{{ usingSavedKey ? '留空将保留当前密钥。' : '密钥仅用于当前服务；免密服务可留空。' }}</p><NButton v-if="usingSavedKey && apiKeyEditing" text attr-type="button" :disabled="saving" @click="cancelApiKeyEdit">取消更换</NButton></div></div>
+          <div class="field-content"><NInput ref="keyInput" v-model:value="apiKey" type="password" show-password-on="click" :disabled="saving" :input-props="{ id: 'api-key', autocomplete: 'new-password', spellcheck: false }" placeholder="输入访问密钥" /><div class="key-help"><p class="help">{{ usingSavedKey ? '留空将保留当前密钥。' : '密钥仅用于当前服务；免密服务可留空。' }}</p><NButton v-if="usingSavedKey && apiKeyEditing" text attr-type="button" :disabled="saving" @click="cancelApiKeyEdit">取消更换</NButton></div></div>
         </NFormItem>
       </section>
       <section class="settings-card" aria-labelledby="selection-title">

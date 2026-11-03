@@ -11,15 +11,6 @@ import type { TaskStats, TaskSummary } from '../api/tasks'
 
 // Re-read on entry: task detail pages update the store, but the list can be stale after idle time.
 onMounted(() => { void refreshTasks() })
-const summary = computed(() => {
-  const stats = taskStore.stats
-  if (!stats) return ''
-  const parts = [`${stats.total} 项任务`]
-  if (stats.awaiting_approval) parts.push(`${stats.awaiting_approval} 项${TASK_STATUS_LABELS.awaiting_approval}`)
-  if (stats.generation_failed) parts.push(`${stats.generation_failed} 项${TASK_STATUS_LABELS.generation_failed}`)
-  if (stats.approved) parts.push(`${stats.approved} 项${TASK_STATUS_LABELS.approved}`)
-  return parts.join(' · ')
-})
 const filterLabels = TASK_STATUS_ORDER.map(value => [value, TASK_STATUS_LABELS[value]] as const)
 // Only statuses that actually have tasks right now; the row stays quiet otherwise.
 const filterOptions = computed(() => {
@@ -43,7 +34,7 @@ const activeFilterLabel = computed(() => filterLabels.find(([value]) => value ==
     <header class="list-header">
       <div class="list-heading">
         <h1>任务</h1>
-        <p class="description">{{ summary || '每项任务固定一个仓库、一个 commit 和一个 Issue。' }}</p>
+        <p class="description">每项任务固定一个仓库、一个 commit 和一个 Issue。</p>
       </div>
       <div class="list-actions">
         <NButton quaternary size="small" :loading="taskStore.listLoading" :disabled="taskStore.moreLoading" @click="refreshTasks">刷新</NButton>
@@ -104,7 +95,7 @@ const activeFilterLabel = computed(() => filterLabels.find(([value]) => value ==
 
 <style scoped>
 .task-list { width: 100%; max-width: var(--content-width); }
-.list-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.list-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .list-heading { min-width: 0; }
 .list-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 h1 { margin: 0; font-size: 26px; font-weight: 500; line-height: 1.3; }
@@ -112,7 +103,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 500; line-height: 1.3; }
 .new-link { display: inline-flex; align-items: center; justify-content: center; gap: 8px; flex-shrink: 0; min-height: 32px; padding: 0 12px; border-radius: 8px; background: var(--accent); color: var(--on-accent); text-decoration: none; font-weight: 500; font-size: 13px; }
 .new-link:hover { background: var(--accent-hover); color: var(--on-accent); }
 a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.filters { display: flex; flex-wrap: wrap; gap: 4px; margin: -8px 0 16px; }
+.filters { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; }
 .filters button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 2px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
 .filters button:hover { background: var(--surface-hover); color: var(--text); }
 .filters button.active { border-color: var(--border); background: var(--surface); color: var(--text); }
